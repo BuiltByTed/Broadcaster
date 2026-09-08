@@ -192,7 +192,7 @@ class GuideGenerator {
 
     if (prevGuide && prevGuide.schedule && prevGuide.schedule.length > 0) {
       const lastEntry = prevGuide.schedule[prevGuide.schedule.length - 1]
-      if (lastEntry.endTime > dayStart) {
+      if (lastEntry.endTime > dayStart && videos.some(video => video.file_path === lastEntry.filePath)) {
         scheduleStart = lastEntry.endTime
         overlappingEntry = lastEntry
         Log(tag, `Previous video extends ${Math.round((lastEntry.endTime - dayStart) / 1000)}s past 3am`, this.channel)

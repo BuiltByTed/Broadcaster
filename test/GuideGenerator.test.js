@@ -50,7 +50,7 @@ test('carries an entry that overlaps the 3am boundary into the new guide', () =>
   videos = [{
     file_path: '/media/next.mp4',
     duration_seconds: 60 * 60
-  }]
+  }, { file_path: '/media/previous.mp4', duration_seconds: 4 * 60 * 60 }]
   generator.loadGuideForDay = requestedDayStart => {
     assert.equal(requestedDayStart, dayStart - (24 * 60 * 60 * 1000))
     return { schedule: [overlappingEntry] }
@@ -373,4 +373,17 @@ test('validation ignores zero-duration rows when comparing library size', () => 
   }
 
   assert.equal(generator.getGuideValidationError(guide), null)
+})
+
+
+test('a removed program from yesterday cannot create an unplayable overlap', () => {
+  const dayStart = local3am(2026, 0, 16)
+  const generator = new GuideGenerator({ slug: 'removed-overlap', name: 'Test' })
+  videos = [{ file_path: '/media/available.mp4', duration_seconds: 3600 }]
+  generator.loadGuideForDay = () => ({ schedule: [{ hash: 'removed', filePath: '/media/removed.mp4',
+    startTime: dayStart - 3600000, endTime: dayStart + 3600000, duration: 7200 }] })
+  generator.saveGuide = () => {}
+  const guide = generator.generateDailyGuide(dayStart)
+  assert.equal(guide.schedule[0].startTime, dayStart)
+  assert.equal(guide.schedule.some(entry => entry.hash === 'removed'), false)
 })
