@@ -43,14 +43,24 @@ async function main() {
       channel.guideGenerator.saveGuide({ version: 3, channelSlug: slug, dayStart: getPrevious3am(), dayEnd: getNext3am(),
         schedule, shuffleState: { videoCount: 2, remaining: [] } })
       channel.start()
+      // Old caches can have 25+ second segments, requiring a much longer
+      // forward window. Playback must still match wall clock, not its edge.
+      channel.playlistManager.targetDuration = 30
     }
     pool.setStartupStatus('ready')
     ui.start(pool)
     browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] })
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
     let partialResponses = 0
+    let firstProgramTime = null
     const errors = []
     page.on('response', response => { if (response.url().endsWith('/stream.ts') && response.status() === 206) partialResponses++ })
+    page.on('response', async response => {
+      if (new URL(response.url()).pathname !== '/mtv.m3u8' || firstProgramTime !== null) return
+      const playlist = await response.text().catch(() => '')
+      const match = playlist.match(/#EXT-X-PROGRAM-DATE-TIME:([^\n]+)/)
+      if (match && firstProgramTime === null) firstProgramTime = Date.parse(match[1])
+    })
     page.on('pageerror', error => errors.push(error.message))
     await page.goto('http://127.0.0.1:12129')
     await page.getByTitle('Power', { exact: true }).click()
@@ -63,6 +73,9 @@ async function main() {
     const later = await page.locator('video').evaluate(video => ({ time: video.currentTime, ready: video.readyState, paused: video.paused }))
     assert.ok(later.time - firstTime > 17, JSON.stringify(later))
     assert.equal(later.paused, false)
+    assert.ok(Number.isFinite(firstProgramTime), 'Expected broadcast timestamp')
+    const clockErrorSeconds = (firstProgramTime + later.time * 1000 - Date.now()) / 1000
+    assert.ok(Math.abs(clockErrorSeconds) < 3, `Picture is ${clockErrorSeconds}s away from the guide clock`)
     await page.getByTitle('TV Guide', { exact: true }).click()
     await page.waitForSelector('.guide-show')
     const cells = await page.locator('.guide-show').count()
@@ -87,7 +100,7 @@ async function main() {
     assert.equal(await page.locator('video').evaluate(video => video.paused), true)
     assert.deepEqual(errors, [])
     assert.ok(partialResponses > 10, `Expected HTTP byte-range playback, got ${partialResponses} partial responses`)
-    console.log(JSON.stringify({ tuneMs, continuousPlaybackSeconds: later.time - firstTime, visibleGuideCells: cells, partialResponses, browserErrors: errors }))
+    console.log(JSON.stringify({ tuneMs, clockErrorSeconds, continuousPlaybackSeconds: later.time - firstTime, visibleGuideCells: cells, partialResponses, browserErrors: errors }))
   } finally {
     await browser?.close()
     ui.stop()

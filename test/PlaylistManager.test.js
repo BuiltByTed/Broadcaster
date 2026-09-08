@@ -341,7 +341,7 @@ test('playlists carry wall-clock start hints, fixed target duration and immutabl
     manager.targetDuration = 10
     t.mock.method(Date, 'now', () => first.startTime + 7000)
     const a = manager.createRollingPlaylist()
-    assert.match(a, /#EXT-X-START:TIME-OFFSET:7\.000,PRECISE=YES/)
+    assert.match(a, /#EXT-X-START:TIME-OFFSET=7\.000,PRECISE=YES/)
     assert.match(a, /#EXT-X-PROGRAM-DATE-TIME:/)
     assert.equal(getTagValue(a, 'EXT-X-TARGETDURATION'), 10)
     assert.equal(manager.getAllSegmentsForVideo('next', fixture.videos.next)[0].startsDiscontinuity, undefined)

@@ -50,6 +50,15 @@ export function startPlayback({ video, url, onPlaying, onStatus, onBlocked }) {
         startFragPrefetch: true
       })
       const player = hls
+      player.on(Hls.Events.LEVEL_LOADED, (_, { details }) => {
+        // This stream includes future programs. Match recovery seeks to the
+        // server's broadcast position, including legacy caches with long GOPs.
+        const offset = details.startTimeOffset
+        if (details.live && Number.isFinite(offset)) {
+          const start = offset < 0 ? details.totalduration + offset : offset
+          player.targetLatency = Math.max(1, details.totalduration - start)
+        }
+      })
       player.on(Hls.Events.MANIFEST_PARSED, () => { if (!disposed && hls === player) play() })
       player.on(Hls.Events.ERROR, (_, data) => {
         if (disposed || hls !== player || !data.fatal) return

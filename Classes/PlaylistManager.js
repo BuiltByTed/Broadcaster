@@ -311,7 +311,7 @@ class PlaylistManager {
         playlist += `#EXT-X-TARGETDURATION:${target}\n`
         playlist += `#EXT-X-MEDIA-SEQUENCE:${position.mediaSequence + startIndex}\n`
         playlist += `#EXT-X-DISCONTINUITY-SEQUENCE:${position.discontinuitySequence}\n`
-        playlist += `#EXT-X-START:TIME-OFFSET:${((now - startTime) / 1000).toFixed(3)},PRECISE=YES\n`
+        playlist += `#EXT-X-START:TIME-OFFSET=${((now - startTime) / 1000).toFixed(3)},PRECISE=YES\n`
         segments.forEach((segment, index) => {
             if (segment.discontinuity) playlist += '#EXT-X-DISCONTINUITY\n'
             if (index === 0 || segment.discontinuity) playlist += `#EXT-X-PROGRAM-DATE-TIME:${new Date(segment.programTime).toISOString()}\n`
