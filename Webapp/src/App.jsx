@@ -574,7 +574,7 @@ function App() {
 
   return (
     <div className="tv-container">
-      <div className="video-wrapper">
+      <div className={`video-wrapper ${showGuide ? 'guide-open' : ''}`}>
         <div
           className={`video-content ${powerAnimation || ''} ${scanlines ? 'crt-enabled' : ''}`}
           onAnimationEnd={() => setPowerAnimation(null)}

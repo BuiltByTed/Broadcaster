@@ -822,11 +822,25 @@ video::-webkit-media-controls-picture-in-picture-button {
 .guide-channel-heading { text-align: center; }
 .guide-show-info { flex-shrink: 0; }
 @media (max-width: 600px) {
-  .guide-channel-heading, .guide-time-axis { height: 18px; line-height: 18px; font-size: 8px; }
-  .guide-header { gap: 5px; flex-wrap: nowrap; }
-  .guide-settings { gap: 5px; }
-  .guide-setting span { font-size: 9px; }
-  .guide-toggle button { padding: 3px 5px; font-size: 9px; }
-  .guide-time-now { font-size: 9px; white-space: nowrap; }
-  .guide-close { width: 22px; height: 22px; }
+  .video-wrapper.guide-open {
+    position: fixed; inset: 0; z-index: 100;
+    width: 100vw; height: 100dvh; box-sizing: border-box;
+    border-width: 8px; border-radius: 14px;
+  }
+  .guide-open .video-content { width: 100% !important; height: 100% !important; }
+  .guide-header { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; padding: 10px; }
+  .guide-header h2 { display: block; font-size: 18px; }
+  .guide-settings { grid-column: 1 / -1; grid-row: 2; margin: 0; justify-content: space-between; gap: 8px; }
+  .guide-setting span { font-size: 11px; }
+  .guide-toggle button { min-height: 32px; padding: 5px 7px; font-size: 12px; }
+  .guide-time-now { font-size: 12px; white-space: nowrap; }
+  .guide-close { width: 36px; height: 36px; font-size: 16px; }
+  .guide-channel-heading, .guide-time-axis { height: 24px; line-height: 24px; font-size: 10px; }
+  .guide-channels { width: 90px; min-width: 90px; }
+  .guide-channel-name { height: 76px; font-size: 12px; padding: 6px; }
+  .guide-channel-row { height: 76px; contain-intrinsic-size: auto 76px; }
+  .guide-show { height: 76px; padding: 8px; }
+  .guide-show-time { font-size: 12px; margin-bottom: 4px; }
+  .guide-show-title { font-size: 14px; }
+  .guide-show-duration { display: block; font-size: 11px; margin-top: 4px; }
 }
