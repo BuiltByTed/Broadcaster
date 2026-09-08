@@ -20,11 +20,16 @@ test('startup migration cannot resurrect a quarantined legacy stream', t => {
   const { migrateExistingVideos } = require('../Utilities/MigrateDatabase')
   assert.equal(migrateExistingVideos('tv'), 0)
   assert.equal(db.getVideoByHash('tv', hash).transcoded, 0)
-  // Simulate interruption between writing the marker and clearing the DB flag.
-  db.markVideoTranscoded(db.getVideoByHash('tv', hash).id, 10, 1, null, null, null, null)
+  assert.equal(db.getVideoByHash('tv', hash).cache_quarantined, 1)
+  // Even an incorrect transcoded flag cannot override durable quarantine.
+  db.db.prepare('UPDATE videos SET transcoded=1 WHERE hash=?').run(hash)
   assert.equal(migrateExistingVideos('tv'), 0)
   assert.equal(db.getVideoByHash('tv', hash).transcoded, 0)
   fs.unlinkSync(path.join(directory, 'invalid-cache.json'))
+  db.db.prepare('UPDATE videos SET cache_quarantined=0 WHERE hash=?').run(hash)
   assert.equal(migrateExistingVideos('tv'), 1)
   assert.equal(db.getVideoByHash('tv', hash).transcoded, 1)
+  db.quarantineVideo(db.getVideoByHash('tv', hash).id)
+  db.markVideoTranscoded(db.getVideoByHash('tv', hash).id, 10, 10, null, null, null, null, 2)
+  assert.equal(db.getVideoByHash('tv', hash).cache_quarantined, 0)
 })

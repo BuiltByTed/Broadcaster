@@ -24,13 +24,17 @@ function migrateExistingVideos(channelSlug) {
     let migratedCount = 0
 
     videos.forEach(video => {
-        const videoDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', video.hash)
-        // Keep quarantine durable even if shutdown interrupted its DB update.
-        if (fs.existsSync(path.join(videoDir, 'invalid-cache.json'))) {
-            if (video.transcoded) db.markVideoNotTranscoded(video.id)
+        if (video.cache_quarantined) {
+            if (video.transcoded) db.quarantineVideo(video.id)
             return
         }
         if (video.transcoded) return
+        const videoDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', video.hash)
+        // Import quarantine markers once; healthy rows require no filesystem I/O.
+        if (fs.existsSync(path.join(videoDir, 'invalid-cache.json'))) {
+            db.quarantineVideo(video.id)
+            return
+        }
 
         const playlistPath = path.join(videoDir, 'index.m3u8')
         const metadataPath = path.join(videoDir, 'metadata.json')
@@ -110,7 +114,7 @@ function backfillDurations() {
         SELECT v.*, c.slug as channel_slug
         FROM videos v
         JOIN channels c ON v.channel_id = c.id
-        WHERE v.transcoded = 1 AND (v.duration_seconds IS NULL OR v.segment_count IS NULL)
+        WHERE v.transcoded = 1 AND v.cache_quarantined = 0 AND (v.duration_seconds IS NULL OR v.segment_count IS NULL)
     `).all()
 
     if (videos.length === 0) {

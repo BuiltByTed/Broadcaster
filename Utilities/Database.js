@@ -85,6 +85,10 @@ class DatabaseManager {
             this.db.exec('ALTER TABLE videos ADD COLUMN max_segment_duration REAL')
         }
 
+        if (!columns.some(column => column.name === 'cache_quarantined')) {
+            this.db.exec('ALTER TABLE videos ADD COLUMN cache_quarantined INTEGER NOT NULL DEFAULT 0')
+        }
+
         if (!columns.some(column => column.name === 'cache_version')) {
             this.db.exec('ALTER TABLE videos ADD COLUMN cache_version INTEGER NOT NULL DEFAULT 0')
         }
@@ -150,10 +154,15 @@ class DatabaseManager {
                 audio_codec = ?,
                 width = ?,
                 height = ?,
-                cache_version = ?
+                cache_version = ?,
+                cache_quarantined = 0
             WHERE id = ?
         `)
         return stmt.run(durationSeconds, segmentCount, videoCodec, audioCodec, width, height, cacheVersion, videoId)
+    }
+
+    quarantineVideo(videoId) {
+        return this.db.prepare('UPDATE videos SET transcoded = 0, cache_quarantined = 1 WHERE id = ?').run(videoId)
     }
 
     updateSegmentMetadata(videoId, parsed) {
@@ -184,7 +193,7 @@ class DatabaseManager {
             WHERE c.slug = ?
         `
         if (transcodedOnly) {
-            query += ' AND v.transcoded = 1'
+            query += ' AND v.transcoded = 1 AND v.cache_quarantined = 0'
         }
         query += ' ORDER BY v.id'
 
@@ -220,9 +229,9 @@ class DatabaseManager {
         return this.db.prepare(`
             SELECT
                 COUNT(*) as total,
-                COALESCE(SUM(CASE WHEN transcoded = 1 THEN 1 ELSE 0 END), 0) as transcoded,
-                MAX(CASE WHEN transcoded = 1 THEN max_segment_duration ELSE 0 END) as maxSegmentDuration,
-                COALESCE(SUM(CASE WHEN cache_version >= 2 AND transcoded = 1 THEN 1 ELSE 0 END), 0) as rebuilt
+                COALESCE(SUM(CASE WHEN transcoded = 1 AND cache_quarantined = 0 THEN 1 ELSE 0 END), 0) as transcoded,
+                MAX(CASE WHEN transcoded = 1 AND cache_quarantined = 0 THEN max_segment_duration ELSE 0 END) as maxSegmentDuration,
+                COALESCE(SUM(CASE WHEN cache_version >= 2 AND transcoded = 1 AND cache_quarantined = 0 THEN 1 ELSE 0 END), 0) as rebuilt
             FROM videos v
             JOIN channels c ON v.channel_id = c.id
             WHERE c.slug = ?

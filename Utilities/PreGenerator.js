@@ -787,10 +787,10 @@ class PreGenerator {
             }
 
             if (videoInfo.timingRepair) {
+                Database().quarantineVideo(videoId)
                 const marker = path.join(path.dirname(outputDir), 'invalid-cache.json')
                 fs.mkdirSync(path.dirname(marker), { recursive: true })
                 fs.writeFileSync(marker, JSON.stringify({ reason: 'stretched_source_timestamps', timingRepair: videoInfo.timingRepair }))
-                Database().markVideoNotTranscoded(videoId)
                 channel.guideGenerator?.invalidateCache()
                 channel.playlistManager?.invalidateCache()
             }
