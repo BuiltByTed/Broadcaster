@@ -30,7 +30,8 @@ function allowHlsStaticPath(req, res, next) {
 
 function setHlsStaticHeaders(res, filePath) {
     if (filePath.endsWith('.ts')) {
-        res.set('Cache-Control', 'no-store')
+        res.set('Content-Type', 'video/mp2t')
+        res.set('Cache-Control', 'public, max-age=3600')
     }
 }
 
@@ -49,17 +50,17 @@ function mountPublicStatic(app, cacheDir, webappDir) {
     fs.mkdirSync(publicDir, { recursive: true })
     fs.mkdirSync(channelsDir, { recursive: true })
 
-    // Copy static directories (16:9 and 4:3 versions)
-    fs.cpSync(path.join(webappDir, 'static'), path.join(channelsDir, 'static'), { recursive: true })
-    fs.cpSync(path.join(webappDir, 'static-4x3'), path.join(channelsDir, 'static-4x3'), { recursive: true })
-
-    // UI lives under public/ so it is not co-mingled with DB/history
-    fs.cpSync(path.join(webappDir, 'dist'), publicDir, { recursive: true, force: true })
-    fs.copyFileSync(path.join(webappDir, 'static.gif'), path.join(publicDir, 'static.gif'))
-
-    app.use(express.static(publicDir, {
-        setHeaders: setHlsStaticHeaders
+    // Serve shipped assets directly: no stale copies or large startup file copies.
+    app.use(express.static(path.join(webappDir, 'dist'), {
+        setHeaders(res, filePath) {
+            res.set('Cache-Control', filePath.endsWith('.html') ? 'no-cache' : 'public, max-age=31536000, immutable')
+        }
     }))
+    for (const slug of ['static', 'static-4x3']) {
+        app.use(`/channels/${slug}`, allowHlsStaticPath, express.static(path.join(webappDir, slug), {
+            setHeaders: setHlsStaticHeaders
+        }))
+    }
 
     app.use('/channels', allowHlsStaticPath, express.static(channelsDir, {
         setHeaders: setHlsStaticHeaders

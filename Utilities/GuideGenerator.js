@@ -3,6 +3,7 @@ const path = require('path')
 const crypto = require('crypto')
 const Log = require('./Log.js')
 const Database = require('./Database.js')
+const { describeVideo, groupSchedule } = require('./GuideDisplay.js')
 const tag = 'GuideGenerator'
 const { CACHE_DIR } = process.env
 
@@ -49,6 +50,8 @@ class GuideGenerator {
   constructor(channel) {
     this.channel = channel
     this.cachedGuide = null
+    this.dayCache = new Map()
+    this.displayCache = new WeakMap()
   }
 
   // Get path to history folder
@@ -64,11 +67,18 @@ class GuideGenerator {
   }
 
   // Check that a saved guide still matches the channel's transcoded library
-  getGuideValidationError(guide) {
+  getGuideValidationError(guide, historical = false) {
     if (!guide || !Array.isArray(guide.schedule)) {
       return 'guide data is malformed'
     }
 
+    if (guide.schedule.some((entry, index) => !entry || !Number.isFinite(entry.startTime) ||
+        !Number.isFinite(entry.endTime) || entry.endTime <= entry.startTime ||
+        !Number.isFinite(entry.duration) || entry.duration <= 0 ||
+        (index > 0 && Math.abs(guide.schedule[index - 1].endTime - entry.startTime) > 1))) {
+      return 'guide timeline is malformed'
+    }
+    if (historical) return null
     const db = Database()
     // Match generateDailyGuide: only count videos with a finite positive duration
     // so zero-duration rows do not permanently mark guides stale.
@@ -85,7 +95,8 @@ class GuideGenerator {
     }
 
     const savedVideoCount = guide.shuffleState && guide.shuffleState.videoCount
-    if (savedVideoCount !== videos.length) {
+    // Newly transcoded videos join the next day; never reshuffle an on-air guide.
+    if (guide.schedule.length === 0 && videos.length > 0) {
       return `library size changed from ${savedVideoCount ?? 'unknown'} to ${videos.length}`
     }
 
@@ -94,6 +105,7 @@ class GuideGenerator {
 
   // Load guide from history for a specific day
   loadGuideForDay(dayStart) {
+    if (this.dayCache.has(dayStart)) return this.dayCache.get(dayStart)
     const historyDir = this.getHistoryDir()
     const filename = this.getGuideFilename(dayStart)
     const filePath = path.join(historyDir, filename)
@@ -101,12 +113,13 @@ class GuideGenerator {
     try {
       if (fs.existsSync(filePath)) {
         const guide = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-        const validationError = this.getGuideValidationError(guide)
+        const validationError = this.getGuideValidationError(guide, dayStart < getPrevious3am())
         if (validationError) {
           Log(tag, `Ignoring stale ${filename}: ${validationError}`, this.channel)
           return null
         }
         Log(tag, `Loaded guide from ${filename}`, this.channel)
+        this.rememberGuide(guide)
         return guide
       }
     } catch (err) {
@@ -123,26 +136,24 @@ class GuideGenerator {
     const filename = this.getGuideFilename(guide.dayStart)
     const filePath = path.join(historyDir, filename)
 
-    fs.writeFileSync(filePath, JSON.stringify(guide, null, 2))
+    const temporaryPath = `${filePath}.${process.pid}.tmp`
+    fs.writeFileSync(temporaryPath, JSON.stringify(guide))
+    fs.renameSync(temporaryPath, filePath)
+    this.rememberGuide(guide)
     Log(tag, `Saved guide to ${filename}`, this.channel)
   }
 
-  // Get video display name (show/movie folder name)
-  getVideoDisplayName(filePath) {
-    if (this.channel.paths) {
-      for (const configuredPath of this.channel.paths) {
-        const relativePath = path.relative(configuredPath, filePath)
-        const isWithinConfiguredPath = relativePath &&
-          relativePath !== '..' &&
-          !relativePath.startsWith(`..${path.sep}`) &&
-          !path.isAbsolute(relativePath)
+  rememberGuide(guide) {
+    this.dayCache.set(guide.dayStart, guide)
+    while (this.dayCache.size > 4) this.dayCache.delete(this.dayCache.keys().next().value)
+  }
 
-        if (isWithinConfiguredPath) {
-          return relativePath.split(path.sep)[0]
-        }
-      }
-    }
-    return path.basename(path.dirname(filePath))
+  getGuideForDay(dayStart) {
+    return this.loadGuideForDay(dayStart) || this.generateDailyGuide(dayStart)
+  }
+
+  getVideoDisplayName(filePath) {
+    return describeVideo(filePath, this.channel.paths).title
   }
 
   // Generate a new daily guide
@@ -163,7 +174,7 @@ class GuideGenerator {
       Log(tag, `No transcoded videos with positive duration available`, this.channel)
       const guide = this.createEmptyGuide(dayStart)
       this.saveGuide(guide)
-      this.cachedGuide = guide
+      if (guide.dayStart === getPrevious3am()) this.cachedGuide = guide
       return guide
     }
 
@@ -198,7 +209,9 @@ class GuideGenerator {
       : [...videos].sort((a, b) =>
         a.file_path.localeCompare(b.file_path, undefined, { sensitivity: 'base' })
       )
-    let scheduledVideos = shouldShuffle ? shuffleArray(libraryVideos) : libraryVideos
+    const byHash = new Map(libraryVideos.map(video => [crypto.createHash('md5').update(video.file_path).digest('hex'), video]))
+    const remaining = (prevGuide?.shuffleState?.remaining || []).map(hash => byHash.get(hash)).filter(Boolean)
+    let scheduledVideos = remaining.length ? remaining : (shouldShuffle ? shuffleArray(libraryVideos) : libraryVideos)
     let videoIndex = 0
 
     while (currentTime < dayEnd) {
@@ -223,7 +236,9 @@ class GuideGenerator {
         filePath: video.file_path,
         startTime: currentTime,
         endTime: currentTime + (duration * 1000),
-        duration: duration
+        duration: duration,
+        segmentCount: video.segment_count,
+        cacheVersion: video.cache_version || 0
       })
 
       currentTime += duration * 1000
@@ -236,7 +251,7 @@ class GuideGenerator {
     )
 
     const guide = {
-      version: 2,
+      version: 3,
       generatedAt: Date.now(),
       dayStart: dayStart,
       dayEnd: dayEnd,
@@ -250,7 +265,7 @@ class GuideGenerator {
     }
 
     this.saveGuide(guide)
-    this.cachedGuide = guide
+    if (guide.dayStart === getPrevious3am()) this.cachedGuide = guide
 
     Log(tag, `Generated guide with ${schedule.length} entries`, this.channel)
     return guide
@@ -259,7 +274,7 @@ class GuideGenerator {
   // Create empty guide for channels with no content
   createEmptyGuide(dayStart) {
     return {
-      version: 2,
+      version: 3,
       generatedAt: Date.now(),
       dayStart: dayStart,
       dayEnd: getNext3am(dayStart),
@@ -284,7 +299,7 @@ class GuideGenerator {
     let guide = this.loadGuideForDay(todayStart)
 
     if (guide) {
-      this.cachedGuide = guide
+      if (guide.dayStart === getPrevious3am()) this.cachedGuide = guide
       return guide
     }
 
@@ -330,7 +345,7 @@ class GuideGenerator {
 
     return guide.schedule.map(entry => ({
       hash: entry.hash,
-      title: entry.title,
+      ...describeVideo(entry.filePath || entry.title, this.channel.paths),
       startTime: entry.startTime,
       endTime: entry.endTime,
       duration: entry.duration,
@@ -338,14 +353,23 @@ class GuideGenerator {
     }))
   }
 
+  getDisplaySchedule() {
+    const guide = this.getActiveGuide()
+    if (!guide) return []
+    if (!this.displayCache.has(guide)) this.displayCache.set(guide, groupSchedule(guide.schedule, this.channel))
+    return this.displayCache.get(guide)
+  }
+
   // Invalidate cached guide (call when videos are added/removed)
   invalidateCache() {
     this.cachedGuide = null
+    this.dayCache.clear()
   }
 }
 
 module.exports = {
   GuideGenerator,
   getPrevious3am,
-  getNext3am
+  getNext3am,
+  getPreviousDay3am
 }

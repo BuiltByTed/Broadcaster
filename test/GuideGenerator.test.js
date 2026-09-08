@@ -195,7 +195,7 @@ test('uses the filename for media directly beneath a configured root', () => {
   })
   const filePath = path.join(path.sep, 'media', 'movies', 'Dune.mkv')
 
-  assert.equal(guideGenerator.getVideoDisplayName(filePath), 'Dune.mkv')
+  assert.equal(guideGenerator.getVideoDisplayName(filePath), 'Dune')
 })
 
 test('does not treat a sibling path with the same prefix as configured content', () => {

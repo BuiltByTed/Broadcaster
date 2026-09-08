@@ -2,6 +2,7 @@ const express = require('express')
 const Log = require('../Utilities/Log.js')
 const { newCorrelationId } = require('../Utilities/LogContext.js')
 const Database = require('../Utilities/Database.js')
+const PreGenerator = require('../Utilities/PreGenerator.js')
 const { getPrevious3am } = require('../Utilities/GuideGenerator.js')
 const tag = 'TelevisionUI'
 const compression = require('compression')
@@ -37,7 +38,7 @@ function regenerateAllGuides() {
     ChannelPool().queue.forEach(channel => {
         if (channel.started && channel.guideGenerator) {
             const dayStart = getPrevious3am()
-            channel.guideGenerator.generateDailyGuide(dayStart)
+            channel.guideGenerator.getGuideForDay(dayStart)
         }
     })
 
@@ -55,8 +56,8 @@ function scheduleDaily3amRegeneration() {
     Log(tag, `Next guide regeneration scheduled in ${hoursUntil} hours (at 3am)`)
 
     guideRegenerationTimer = setTimeout(() => {
-        regenerateAllGuides()
-        scheduleDaily3amRegeneration()
+        try { regenerateAllGuides() } catch (error) { Log(tag, 'Guide regeneration failed', undefined, { error }) }
+        finally { scheduleDaily3amRegeneration() }
     }, msUntil3am)
 }
 
@@ -78,9 +79,11 @@ function buildManifestEntryPayload(info) {
 }
 
 // Build combined guide from all channels for API response
-function buildCombinedGuide() {
+function buildCombinedGuide(displayOnly = false) {
     const guide = {
         dayStart: null,
+        dayEnd: null,
+        serverTime: Date.now(),
         channels: {}
     }
 
@@ -90,11 +93,12 @@ function buildCombinedGuide() {
             if (channelGuide && channelGuide.schedule && channelGuide.schedule.length > 0) {
                 if (!guide.dayStart) {
                     guide.dayStart = channelGuide.dayStart
+                    guide.dayEnd = channelGuide.dayEnd
                 }
                 guide.channels[channel.slug] = {
                     name: channel.name,
                     slug: channel.slug,
-                    schedule: channel.guideGenerator.getScheduleForAPI()
+                    schedule: displayOnly ? channel.guideGenerator.getDisplaySchedule() : channel.guideGenerator.getScheduleForAPI()
                 }
             }
         }
@@ -107,7 +111,8 @@ class TelevisionUI {
 
   constructor(app, port) {
     this.app = express()
-    this.port = WEB_UI_PORT
+    this.port = Number(WEB_UI_PORT) || 12121
+    this.app.disable('x-powered-by')
   }
 
   start(channelPool) {
@@ -135,8 +140,8 @@ class TelevisionUI {
     })
 
     // UI + HLS only — DB/history/manifests are not under the static root
-    mountPublicStatic(this.app, CACHE_DIR, __dirname)
     this.app.use(compression())
+    mountPublicStatic(this.app, CACHE_DIR, __dirname)
 
     // Dynamic manifest - always reflects current channelPool state
     this.app.get(`/manifest.json`, function(req, res) {
@@ -158,7 +163,7 @@ class TelevisionUI {
             }
           }
         })
-        res.send(JSON.stringify(manifest))
+        res.set('Cache-Control', 'no-store').json(manifest)
     })
 
     // Database stats endpoint
@@ -173,6 +178,8 @@ class TelevisionUI {
                 totalVideos: channelStats.total,
                 transcodedVideos: channelStats.transcoded,
                 pendingVideos: channelStats.total - channelStats.transcoded,
+                rebuiltVideos: channelStats.rebuilt,
+                rebuildPending: channelStats.total - channelStats.rebuilt,
                 percentComplete: channelStats.total > 0
                     ? Math.round((channelStats.transcoded / channelStats.total) * 100)
                     : 0
@@ -180,6 +187,7 @@ class TelevisionUI {
         })
         res.json({
             channels: stats,
+            generation: PreGenerator.getProgress(),
             totals: {
                 totalVideos: stats.reduce((sum, s) => sum + s.totalVideos, 0),
                 transcodedVideos: stats.reduce((sum, s) => sum + s.transcodedVideos, 0),
@@ -241,7 +249,7 @@ class TelevisionUI {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate')
         res.set('Pragma', 'no-cache')
 
-        const guide = buildCombinedGuide()
+        const guide = buildCombinedGuide(req.query.display === '1')
         res.json(guide)
     })
 
@@ -273,6 +281,7 @@ class TelevisionUI {
     // Manifest endpoint - shows hash to filename mapping for debugging
     this.app.get(`/:slug/manifest`, function(req, res) {
         const slug = req.params.slug
+        if (!channelPool.getChannelBySlug(slug)) return res.status(404).json({ error: 'Channel not found' })
         const manifestPath = path.join(CACHE_DIR, 'channels', slug, 'manifest.json')
 
         if (!fs.existsSync(manifestPath)) {
@@ -288,7 +297,7 @@ class TelevisionUI {
             }
             res.json(result)
         } catch (e) {
-            res.json({ error: 'Failed to read manifest: ' + e.message })
+            res.status(500).json({ error: 'Could not read manifest' })
         }
     })
 
@@ -308,15 +317,15 @@ class TelevisionUI {
                 const playlist = channel.getPlaylist()
 
                 if (!playlist) {
-                    res.statusCode = 500
-                    res.send('Playlist not available')
+                    res.set({ 'Retry-After': '2', 'Cache-Control': 'no-store' })
+                    res.status(503).send('Channel is preparing media')
                     return
                 }
 
                 res.set({
                     'Content-Type': 'application/x-mpegURL',
-                    'Cache-Control': `max-age=${M3U8_MAX_AGE}`,
-                    'Strict-Transport-Security': `max-age=${Date.now() + M3U8_MAX_AGE*1000}; includeSubDomains; preload`
+                    'Cache-Control': 'no-store',
+                    'X-Content-Type-Options': 'nosniff'
                 })
                 res.send(playlist)
 
@@ -331,15 +340,21 @@ class TelevisionUI {
                 res.send('')
             }
         } else {
-            res.statusCode = 500
-            res.send('Broadcaster HLS channel not started yet.')
+            res.set({ 'Retry-After': '2', 'Cache-Control': 'no-store' }).status(503).send('Channel is starting')
         }
     })
 
-    this.app.listen(WEB_UI_PORT, async () => {
+    this.server = this.app.listen(this.port, async () => {
         Log(tag, `Webapp is live at http://localhost:${WEB_UI_PORT}`)
     })
 
+  }
+
+  stop() {
+    clearTimeout(guideRegenerationTimer)
+    guideRegenerationTimer = null
+    this.server?.close()
+    this.server?.closeIdleConnections()
   }
 
 }

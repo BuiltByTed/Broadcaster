@@ -144,7 +144,7 @@ test('queues a database-positive video when a referenced segment is missing', t 
     assert.equal(fs.existsSync(outputDir), false)
 })
 
-test('skips a database-positive video when the cached generation is complete', t => {
+test('queues a legacy rebuild while keeping its complete cache playable', t => {
     const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-cache-'))
     t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))
     const updates = []
@@ -164,7 +164,8 @@ test('skips a database-positive video when the cached generation is complete', t
 
     queueSingleVideo(preGenerator)
 
-    assert.deepEqual(preGenerator.channelQueues, [])
+    assert.equal(preGenerator.channelQueues[0].length, 1)
+    assert.equal(db.video.transcoded, 1)
     assert.deepEqual(updates, [])
 })
 
@@ -321,8 +322,7 @@ test('persisted guide cannot emit deleted segment URLs after restart', t => {
     const playlist = restartedPlaylistManager.createRollingPlaylist()
 
     assert.deepEqual(reloadedGuide.schedule, [])
-    assert.match(playlist, /#EXT-X-ENDLIST/)
-    assert.doesNotMatch(playlist, /segment_\d+\.ts/)
+    assert.equal(playlist, null)
 })
 
 test('stopActiveWorkers SIGTERMs then SIGKILLs tracked ffmpeg children', () => {
@@ -500,6 +500,7 @@ test('generateVideo skips unreadable media without spawning ffmpeg', async t => 
     const filePath = '/library/Saturday Night Live (1975) - s43e13 - Natalie Portman+Dua Lipa.mkv'
     const preGenerator = loadPreGenerator(cacheDir, createDatabase(filePath, []), { logs })
     const channel = { slug: 'late-night', name: 'Late Night' }
+    preGenerator.probeVideo = async () => ({ codec: 'unreadable', probeFailed: true, probeError: 'Invalid data found when processing input' })
     const result = await preGenerator.generateVideo(41, filePath, channel)
 
     assert.deepEqual(result, { skipped: true, reason: 'unreadable' })
@@ -531,7 +532,7 @@ test('generateVideo skips unreadable media without spawning ffmpeg', async t => 
 
     // Permanent unreadable marker so later queueChannel cycles skip this source
     assert.equal(preGenerator.isMarkedUnreadable(filePath, channel.slug), true)
-    const marker = JSON.parse(fs.readFileSync(preGenerator.unreadableMarkerPath(filePath, channel.slug), 'utf8'))
+    const marker = JSON.parse(fs.readFileSync(path.join(path.dirname(preGenerator.unreadableMarkerPath(filePath, channel.slug)), 'v2', 'unreadable.json'), 'utf8'))
     assert.equal(marker.reason, 'ffprobe_failed')
 })
 
@@ -639,7 +640,6 @@ test('generateVideo marks invalid-input ffmpeg exit as unreadable and resolves',
         exports: () => createDatabase(filePath, [])
     }
     delete require.cache[preGeneratorPath]
-    const preGenerator = require(preGeneratorPath)
 
     t.mock.method(childProcess, 'execFileSync', (cmd, args) => {
         if (cmd === 'ffprobe' && Array.isArray(args) && args.includes('a:0')) return 'aac\n'
@@ -665,7 +665,9 @@ test('generateVideo marks invalid-input ffmpeg exit as unreadable and resolves',
         return proc
     })
 
+    const preGenerator = require(preGeneratorPath)
     const channel = { slug: 'news', name: 'News' }
+    preGenerator.probeVideo = async () => ({ codec: 'h264', width: 640, height: 480, pixFmt: 'yuv420p', audioCodec: 'aac' })
     const result = await preGenerator.generateVideo(41, filePath, channel)
 
     assert.deepEqual(result, { skipped: true, reason: 'unreadable' })

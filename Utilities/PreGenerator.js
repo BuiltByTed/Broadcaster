@@ -1,10 +1,12 @@
-const { spawn, execSync, execFileSync } = require('child_process')
+const { spawn, execSync, execFileSync, execFile } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const Log = require('./Log.js')
 const Database = require('./Database.js')
+const { parseHlsPlaylist } = require('./HlsPlaylist.js')
 const tag = 'PreGenerator'
+const HLS_CACHE_VERSION = 2
 
 const { CACHE_DIR,
         VIDEO_CODEC,
@@ -74,27 +76,15 @@ function checkNvidiaGPU() {
     if (gpuCheckDone) return hasNvidiaGPU
 
     try {
-        // Run nvidia-smi and check if output contains GPU info
-        // Note: nvidia-smi may return non-zero exit code (e.g., 14) for warnings
-        // like corrupted infoROM, but still work fine for encoding
-        const output = execSync('nvidia-smi', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
-        if (output.includes('NVIDIA-SMI') && output.includes('Driver Version')) {
-            hasNvidiaGPU = true
-            Log(tag, 'NVIDIA GPU detected - hardware acceleration enabled')
-        } else {
-            hasNvidiaGPU = false
-            Log(tag, 'No NVIDIA GPU detected - using software encoding')
-        }
+        // Query the device directly; recent NVIDIA releases changed the human
+        // table from "Driver Version" to "KMD Version".
+        const output = execFileSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'],
+            { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
+        hasNvidiaGPU = Boolean(output.trim()) && !/no devices|failed|error/i.test(output)
     } catch (error) {
-        // Check if nvidia-smi ran but exited with non-zero (e.g., infoROM warning)
-        if (error.stdout && error.stdout.includes('NVIDIA-SMI') && error.stdout.includes('Driver Version')) {
-            hasNvidiaGPU = true
-            Log(tag, 'NVIDIA GPU detected - hardware acceleration enabled')
-        } else {
-            hasNvidiaGPU = false
-            Log(tag, 'No NVIDIA GPU detected - using software encoding')
-        }
+        hasNvidiaGPU = Boolean(error.stdout?.toString().trim()) && !/no devices|failed|error/i.test(error.stdout.toString())
     }
+    Log(tag, hasNvidiaGPU ? 'NVIDIA GPU detected - hardware acceleration enabled' : 'No NVIDIA GPU detected - using software encoding')
 
     gpuCheckDone = true
     return hasNvidiaGPU
@@ -162,7 +152,7 @@ function resolveEncodeSettings({
 
     if (videoCodec === 'h264_nvenc') {
         videoCodec = 'libx264'
-        resolvedPreset = videoPreset || 'veryfast'
+        resolvedPreset = /^(ultrafast|superfast|veryfast|faster|fast|medium|slow|slower|veryslow)$/.test(videoPreset || '') ? videoPreset : 'veryfast'
         Log(tag, 'GPU requested but not available - falling back to software encoding', channel)
     } else if (!resolvedPreset) {
         // Sensible defaults when VIDEO_PRESET is unset
@@ -245,7 +235,14 @@ class PreGenerator {
 
     isMarkedUnreadable(filePath, channelSlug) {
         try {
-            return fs.existsSync(this.unreadableMarkerPath(filePath, channelSlug))
+            const marker = this.unreadableMarkerPath(filePath, channelSlug)
+            const versioned = path.join(path.dirname(marker), `v${HLS_CACHE_VERSION}`, 'unreadable.json')
+            const markerPath = fs.existsSync(versioned) ? versioned : marker
+            if (!fs.existsSync(markerPath)) return false
+            const data = JSON.parse(fs.readFileSync(markerPath, 'utf8'))
+            if (data.sourceSize == null) return !fs.existsSync(filePath)
+            const stat = fs.statSync(filePath)
+            return stat.size === data.sourceSize && stat.mtimeMs === data.sourceMtimeMs
         } catch (_) {
             return false
         }
@@ -268,7 +265,10 @@ class PreGenerator {
             } else {
                 fs.mkdirSync(outputDir, { recursive: true })
             }
+            let source = {}
+            try { const stat = fs.statSync(filePath); source = { sourceSize: stat.size, sourceMtimeMs: stat.mtimeMs } } catch (_) {}
             const payload = {
+                ...source,
                 originalPath: filePath,
                 reason,
                 markedAt: new Date().toISOString(),
@@ -332,13 +332,13 @@ class PreGenerator {
      * Check if HLS files already exist for this video and are complete
      * OPTIMIZED: Check database first before filesystem
      */
-    isAlreadyGenerated(filePath, channelSlug) {
+    isAlreadyGenerated(filePath, channelSlug, knownVideo) {
         const videoHash = this.getVideoHash(filePath)
         const fileName = path.basename(filePath)
 
         // Fast check: query database first
         const db = Database()
-        const video = db.getVideoByPath(channelSlug, filePath)
+        const video = knownVideo || db.getVideoByPath(channelSlug, filePath)
 
         // If not in database or not marked as transcoded, it's not generated
         if (!video || !video.transcoded) {
@@ -346,7 +346,7 @@ class PreGenerator {
         }
 
         // Database says it's transcoded, but verify files actually exist
-        const outputDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', videoHash)
+        const outputDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', videoHash, video.cache_version ? `v${video.cache_version}` : '')
         const playlistPath = path.join(outputDir, 'index.m3u8')
 
         // Check if playlist exists
@@ -389,9 +389,11 @@ class PreGenerator {
             }
 
             // Verify all segments referenced in playlist exist
-            const segmentRefs = playlistContent.match(/segment_\d+\.ts/g) || []
+            const parsed = parseHlsPlaylist(playlistContent)
+            const segmentRefs = parsed.segments.map(segment => segment.uri)
+            const fileSet = new Set(files)
             for (const segmentRef of segmentRefs) {
-                if (!fs.existsSync(path.join(outputDir, segmentRef))) {
+                if (!fileSet.has(segmentRef)) {
                     return this.markGenerationIncomplete(
                         db,
                         video,
@@ -414,8 +416,13 @@ class PreGenerator {
                 )
             }
 
+            if (db.updateSegmentMetadata) db.updateSegmentMetadata(video.id, parsed)
             return true
         } catch (e) {
+            if (['EACCES', 'EIO', 'ETIMEDOUT', 'ESTALE'].includes(e.code)) {
+                Log(tag, `Keeping cached media after storage read error: ${e.message}`, undefined, { level: 'warn' })
+                return true
+            }
             return this.markGenerationIncomplete(
                 db,
                 video,
@@ -462,6 +469,7 @@ class PreGenerator {
         let removed = 0
         const videosDir = path.join(CACHE_DIR, 'channels', channel.slug, 'videos')
         for (const hash of Object.keys(manifest)) {
+            if (!/^[a-f0-9]{32}$/.test(hash)) { delete manifest[hash]; continue }
             if (!currentHashes.has(hash)) {
                 const videoDir = path.join(videosDir, hash)
                 const filename = manifest[hash].filename || hash
@@ -500,7 +508,7 @@ class PreGenerator {
         let orphansDeleted = 0
         if (fs.existsSync(videosDir)) {
             try {
-                const existingFolders = fs.readdirSync(videosDir)
+                const existingFolders = fs.readdirSync(videosDir).filter(folder => /^[a-f0-9]{32}$/.test(folder))
                 for (const folder of existingFolders) {
                     if (!currentHashes.has(folder)) {
                         const orphanDir = path.join(videosDir, folder)
@@ -538,6 +546,21 @@ class PreGenerator {
      * Manifest updates are deferred to avoid blocking startup
      */
     queueChannel(channel) {
+        for (const unused of this.scanChannel(channel)) { /* synchronous compatibility */ }
+    }
+
+    async queueChannelAsync(channel) {
+        let checkpoint = Date.now()
+        for (const unused of this.scanChannel(channel)) {
+            if (Date.now() - checkpoint >= 20) {
+                await new Promise(resolve => setImmediate(resolve))
+                checkpoint = Date.now()
+            }
+            if (this.shuttingDown) break
+        }
+    }
+
+    *scanChannel(channel) {
         // Defer manifest update to background - don't block startup
         this.pendingManifestUpdates = this.pendingManifestUpdates || []
         this.pendingManifestUpdates.push(channel)
@@ -551,16 +574,18 @@ class PreGenerator {
         const channelQueue = []
         let skippedCount = 0
 
-        allVideos.forEach(video => {
+        for (const video of allVideos) {
+            yield video
             // Corrupt/unreadable sources are marked once and left out of the queue.
             if (this.isMarkedUnreadable(video.file_path, channel.slug)) {
                 skippedCount++
-                return
+                continue
             }
             // Database-positive rows still need their cached files verified.
             if (
                 transcodedPaths.has(video.file_path) &&
-                this.isAlreadyGenerated(video.file_path, channel.slug)
+                this.isAlreadyGenerated(video.file_path, channel.slug, video) &&
+                (video.cache_version || 0) >= HLS_CACHE_VERSION
             ) {
                 skippedCount++
             } else {
@@ -571,7 +596,7 @@ class PreGenerator {
                     channel
                 })
             }
-        })
+        }
 
         if (channelQueue.length > 0) {
             this.channelQueues.push(channelQueue)
@@ -658,7 +683,7 @@ class PreGenerator {
             }
 
             return {
-                codec: videoParts[0] || 'unknown',
+                codec: videoParts[0] || 'unreadable',
                 width: videoParts[1] || 'unknown',
                 height: videoParts[2] || 'unknown',
                 pixFmt: videoParts[3] || 'unknown',
@@ -683,19 +708,39 @@ class PreGenerator {
         }
     }
 
+    async probeVideo(filePath) {
+        return new Promise(resolve => {
+            const probe = execFile('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', filePath],
+                { encoding: 'utf8', timeout: 15000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
+                if (error) return resolve({ codec: 'unreadable', probeFailed: true, probeError: this.describeProbeFailure(error) })
+                try {
+                    const streams = JSON.parse(stdout).streams || []
+                    const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic)
+                    if (!video) return resolve({ codec: 'unreadable', probeFailed: true })
+                    const audio = streams.find(stream => stream.codec_type === 'audio')
+                    resolve({ codec: video.codec_name, width: video.width, height: video.height,
+                        pixFmt: video.pix_fmt, bitDepth: video.bits_per_raw_sample || '8', audioCodec: audio?.codec_name || 'none' })
+                } catch (_) { resolve({ codec: 'unreadable', probeFailed: true }) }
+            })
+            this.activeProcesses.add(probe)
+            probe.once('close', () => this.activeProcesses.delete(probe))
+        })
+    }
+
     /**
      * Generate HLS files for a single video
      */
-    generateVideo(videoId, filePath, channel) {
+    async generateVideo(videoId, filePath, channel, options = {}) {
+        const videoInfo = await this.probeVideo(filePath)
+        if (this.shuttingDown) throw new Error('Generation is stopping')
         return new Promise((resolve, reject) => {
             const videoHash = this.getVideoHash(filePath)
-            const outputDir = path.join(CACHE_DIR, 'channels', channel.slug, 'videos', videoHash)
+            const outputDir = path.join(CACHE_DIR, 'channels', channel.slug, 'videos', videoHash, `v${HLS_CACHE_VERSION}`)
             const outputPath = path.join(outputDir, 'index.m3u8')
             const baseName = path.basename(filePath)
 
             // Probe first. Corrupt/empty/truncated library files (e.g. invalid EBML at byte 0)
             // must not spawn ffmpeg or emit a Processing line that looks like a software ERROR.
-            const videoInfo = this.getVideoInfo(filePath)
             if (isUnreadableProbeResult(videoInfo) || videoInfo.probeFailed) {
                 const reason = videoInfo.probeError || 'probe found no usable streams'
                 // Permanent marker so queueChannel skips this source on later cycles.
@@ -721,12 +766,12 @@ class PreGenerator {
             // Log video info before transcoding
             Log(tag, `Processing ${baseName} [${videoInfo.codec} ${videoInfo.width}x${videoInfo.height} ${videoInfo.pixFmt} ${videoInfo.bitDepth}bit | audio: ${videoInfo.audioCodec}]`, channel)
 
-            const hasGPU = checkNvidiaGPU()
-            const [width] = DIMENSIONS.split('x')
+            const hasGPU = !options.forceCpu && checkNvidiaGPU()
+            const [width] = (DIMENSIONS || '640x480').split('x')
 
             // Check if this file can use GPU - 10-bit and some codecs don't work well with CUDA filters
             const is10Bit = videoInfo.pixFmt && (videoInfo.pixFmt.includes('10') || videoInfo.bitDepth === '10')
-            const gpuCompatibleCodecs = ['h264', 'hevc', 'vp9', 'av1', 'mpeg2video', 'mpeg4']
+            const gpuCompatibleCodecs = ['h264', 'hevc', 'vp9', 'mpeg2video']
             const canUseGPU = hasGPU &&
                               VIDEO_CODEC === 'h264_nvenc' &&
                               !is10Bit &&
@@ -747,23 +792,28 @@ class PreGenerator {
                 channel
             })
 
-            // Determine audio handling - copy if already AAC, otherwise re-encode
-            const canCopyAudio = videoInfo.audioCodec === 'aac'
-            const audioArgs = canCopyAudio
-                ? ['-c:a', 'copy']
-                : ['-c:a', AUDIO_CODEC, '-b:a', AUDIO_BITRATE, '-ac', '2']
+            // Fixed AAC stereo format prevents decoder changes between programs.
+            const audioArgs = ['-c:a', 'aac', '-b:a', AUDIO_BITRATE || '192k', '-ac', '2', '-ar', '48000']
+            const segmentSeconds = Math.max(1, Number(HLS_SEGMENT_LENGTH_SECONDS) || 2)
 
             const args = [
+                '-hide_banner', '-nostdin', '-y', '-filter_threads', '2', '-threads', '4',
                 ...inputArgs,
+                ...(videoInfo.audioCodec === 'none' ? ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000'] : []),
+                '-map', '0:v:0', '-map', videoInfo.audioCodec === 'none' ? '1:a:0' : '0:a:0', '-sn', '-dn',
+                ...(videoInfo.audioCodec === 'none' ? ['-shortest'] : []),
                 '-vf', fullVideoFilter,
-                '-c:v', videoCodec,
+                '-c:v', videoCodec, '-threads', '4',
                 '-preset', videoPreset,
                 ...qualityArgs,
                 '-profile:v', 'main',
-                '-level', '3.1',
+                '-force_key_frames', `expr:gte(t,n_forced*${segmentSeconds})`,
+                ...(videoCodec === 'h264_nvenc' ? ['-forced-idr', '1'] : []),
+                '-flags', '+cgop',
                 '-pix_fmt', 'yuv420p',
                 ...audioArgs,
-                '-hls_time', HLS_SEGMENT_LENGTH_SECONDS,
+                '-hls_time', String(segmentSeconds),
+                '-hls_flags', 'independent_segments+temp_file',
                 '-hls_list_size', '0',
                 '-hls_segment_filename', path.join(outputDir, 'segment_%05d.ts'),
                 '-f', 'hls',
@@ -772,7 +822,11 @@ class PreGenerator {
 
             const ffmpeg = spawn('ffmpeg', args)
             this.activeProcesses.add(ffmpeg)
-            const untrack = () => this.activeProcesses.delete(ffmpeg)
+            let lastOutput = Date.now()
+            const watchdog = setInterval(() => {
+                if (Date.now() - lastOutput > 120000) ffmpeg.kill('SIGKILL')
+            }, 15000)
+            const untrack = () => { clearInterval(watchdog); this.activeProcesses.delete(ffmpeg) }
             ffmpeg.once('close', untrack)
             ffmpeg.once('error', untrack)
 
@@ -780,7 +834,8 @@ class PreGenerator {
             let stderrData = ''
 
             ffmpeg.stderr.on('data', (data) => {
-                stderrData += data.toString()
+                lastOutput = Date.now()
+                stderrData = (stderrData + data.toString()).slice(-32768)
             })
 
             ffmpeg.on('close', (code) => {
@@ -789,31 +844,25 @@ class PreGenerator {
                     return
                 }
                 if (code === 0) {
+                  try {
                     const duration = (Date.now() - startTime) / 1000
                     Log(tag, `Generated ${baseName} in ${duration.toFixed(1)}s [${this.currentIndex}/${this.totalVideos}]`, channel)
 
-                    // Get video duration and segment count from the generated playlist
-                    let videoDuration = 0
-                    let segmentCount = 0
-                    try {
-                        const playlistContent = fs.readFileSync(outputPath, 'utf8')
-                        playlistContent.split('\n').forEach(line => {
-                            if (line.startsWith('#EXTINF:')) {
-                                const match = line.match(/#EXTINF:([\d.]+)/)
-                                if (match) videoDuration += parseFloat(match[1])
-                                segmentCount++
-                            }
-                        })
-                    } catch (e) {
-                        Log(tag, `Could not calculate video duration: ${e.message}`, channel, { error: e, playlist_path: outputPath, video_hash: videoHash })
-                    }
+                    const parsed = parseHlsPlaylist(fs.readFileSync(outputPath, 'utf8'))
+                    if (!parsed.complete) throw new Error('Encoder did not finalize playlist')
+                    if (parsed.maxDuration > segmentSeconds + 0.5) throw new Error(`Segments exceed keyframe interval: ${parsed.maxDuration}s`)
+                    const videoDuration = parsed.duration
+                    const segmentCount = parsed.segments.length
 
                     // Store metadata
                     const metadata = {
                         originalPath: filePath,
                         videoHash: videoHash,
                         generatedAt: new Date().toISOString(),
-                        duration: duration,
+                        duration: videoDuration,
+                        encodingSeconds: duration,
+                        maxSegmentDuration: parsed.maxDuration,
+                        cacheVersion: HLS_CACHE_VERSION,
                         segmentCount: segmentCount
                     }
                     fs.writeFileSync(
@@ -831,18 +880,28 @@ class PreGenerator {
                             videoInfo.codec,
                             videoInfo.audioCodec,
                             parseInt(videoInfo.width) || null,
-                            parseInt(videoInfo.height) || null
+                            parseInt(videoInfo.height) || null,
+                            HLS_CACHE_VERSION
                         )
+                        db.updateSegmentMetadata(videoId, parsed)
                     } catch (dbErr) {
-                        Log(tag, `Database update error: ${dbErr.message}`, channel, { error: dbErr, video_id: videoId, video_hash: videoHash })
+                        throw dbErr
                     }
 
                     // Invalidate playlist cache so newly transcoded video appears
                     if (channel.playlistManager) {
-                        channel.playlistManager.invalidateCache()
+                        // Leave on-air segment numbering and program timing intact.
+                        const guide = channel.guideGenerator?.cachedGuide
+                        if (!guide || guide.schedule.length === 0) channel.playlistManager.invalidateCache()
                     }
 
                     resolve()
+                  } catch (error) {
+                    reject(error)
+                  }
+                } else if (hasGPU && !options.forceCpu) {
+                    Log(tag, `Retrying ${baseName} with software encoding`, channel)
+                    this.generateVideo(videoId, filePath, channel, { forceCpu: true }).then(resolve, reject)
                 } else if (isUnreadableMediaStderr(stderrData)) {
                     // Library media problem, not an encode-path bug. One warn line; no raw Error: dump.
                     // Mark permanently so queueChannel does not re-queue every cycle.
@@ -931,35 +990,47 @@ class PreGenerator {
 
         Log(tag, `Starting generation of ${this.totalVideos} videos (round-robin across channels)...`)
 
-        for (const item of this.generationQueue) {
-            if (this.shuttingDown) {
-                break
-            }
-            this.currentIndex++
-            try {
-                await this.generateVideo(item.videoId, item.filePath, item.channel)
-            } catch (err) {
-                if (this.shuttingDown) {
-                    break
+        this.completedVideos = 0
+        this.failedVideos = 0
+        this.skippedVideos = 0
+        let nextIndex = 0
+        const workers = Math.max(1, Math.min(4, Number(process.env.GENERATION_WORKERS) ||
+            (VIDEO_CODEC === 'h264_nvenc' && checkNvidiaGPU() ? 2 : 1)))
+        Log(tag, `Using ${workers} background encoder worker(s)`)
+        const work = async () => {
+            while (!this.shuttingDown && !this.pausedReason && nextIndex < this.generationQueue.length) {
+                try {
+                    const disk = fs.statfsSync(CACHE_DIR)
+                    if (disk.bavail * disk.bsize < 5 * 1024 ** 3) {
+                        this.pausedReason = 'Less than 5 GiB free; restart after freeing space to resume'
+                        break
+                    }
+                } catch (_) { /* filesystems without statfs still support encoding */ }
+                const item = this.generationQueue[nextIndex++]
+                this.currentIndex++
+                try {
+                    const result = await this.generateVideo(item.videoId, item.filePath, item.channel)
+                    if (result?.skipped) this.skippedVideos++
+                } catch (error) {
+                    if (this.shuttingDown) break
+                    if (error?.code === 'UNREADABLE_MEDIA' || error?.mediaSkip || error?.unreadable) this.skippedVideos++
+                    else {
+                        this.failedVideos++
+                        Log(tag, `Skipping video after encode exit: ${item.filePath}`, item.channel, {
+                            file_path: item.filePath, reason: error?.message || 'encode_exit'
+                        })
+                    }
                 }
-                // Probe/unreadable paths resolve as skipped (no throw). If a path still rejects with
-                // UNREADABLE_MEDIA / mediaSkip, do not stack a second ERROR-classified line.
-                if (err && (err.code === 'UNREADABLE_MEDIA' || err.mediaSkip || err.unreadableMedia)) {
-                    continue
-                }
-                // generateVideo already logged unexpected failures at error level.
-                // Avoid "failed" in a second message — it classifies as ERROR and files a log-monitor
-                // ticket even when the real failure was already recorded. "Skipping" → warn.
-                Log(tag, `Skipping video after encode exit: ${item.filePath}`, item.channel, {
-                    file_path: item.filePath,
-                    reason: err && err.message ? err.message : 'encode_exit'
-                })
+                this.completedVideos++
             }
         }
+        await Promise.all(Array.from({ length: workers }, work))
 
         this.isGenerating = false
         if (this.shuttingDown) {
             Log(tag, 'Generation stopped during shutdown')
+        } else if (this.pausedReason) {
+            Log(tag, `Generation paused: ${this.pausedReason}`)
         } else {
             Log(tag, `Generation complete! Processed ${this.totalVideos} videos.`)
         }
@@ -970,11 +1041,15 @@ class PreGenerator {
      */
     getProgress() {
         return {
-            current: this.currentIndex,
+            current: this.completedVideos || 0,
+            activeVideos: this.currentIndex - (this.completedVideos || 0),
+            failedVideos: this.failedVideos || 0,
+            skippedVideos: this.skippedVideos || 0,
             total: this.totalVideos,
             isGenerating: this.isGenerating,
+            pausedReason: this.pausedReason || null,
             percentComplete: this.totalVideos > 0
-                ? Math.round((this.currentIndex / this.totalVideos) * 100)
+                ? Math.round(((this.completedVideos || 0) / this.totalVideos) * 100)
                 : 100
         }
     }

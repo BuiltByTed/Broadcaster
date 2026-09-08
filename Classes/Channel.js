@@ -9,22 +9,28 @@ const path = require('path')
 const tag = 'Channel'
 
 // Recursively find all files in a directory
-function findFiles(dir, fileList = []) {
-  const files = fs.readdirSync(dir)
-
-  files.forEach(file => {
-    const filePath = path.join(dir, file)
-    if (fs.statSync(filePath).isDirectory()) {
-      findFiles(filePath, fileList)
-    } else {
-      fileList.push(filePath)
-    }
-  })
-
+function findFiles(dir, fileList = [], visited = new Set()) {
+  const real = fs.realpathSync(dir)
+  if (visited.has(real)) return fileList
+  visited.add(real)
+  for (const file of fs.readdirSync(dir, { withFileTypes: true })) {
+    const filePath = path.join(dir, file.name)
+    const stat = file.isSymbolicLink() ? fs.statSync(filePath) : file
+    if (stat.isDirectory()) findFiles(filePath, fileList, visited)
+    else if (stat.isFile()) fileList.push(filePath)
+  }
   return fileList
 }
 
 function Channel(definition) {
+  if (!definition || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(definition.slug || '') ||
+      ['static', 'static-4x3', '__proto__', 'constructor', 'prototype'].includes(definition.slug)) {
+    throw new Error('Channel slug must be a unique URL-safe name')
+  }
+  if (!Array.isArray(definition.paths) || !definition.paths.length || definition.paths.some(p => typeof p !== 'string' || !p)) {
+    throw new Error('Channel paths must be a nonempty array of directories')
+  }
+
 
   this.type = definition.type
   this.name = definition.name
@@ -35,6 +41,7 @@ function Channel(definition) {
   // Scan filesystem for videos
   Log(tag, `Scanning filesystem...`, this)
   const allFiles = []
+  let scanComplete = true
 
   definition.paths.forEach(dirPath => {
     let count = 0
@@ -42,6 +49,7 @@ function Channel(definition) {
     try {
       files = findFiles(dirPath)
     } catch (e) {
+      scanComplete = false
       Log(tag, `Unable to scan path ${dirPath}: ${e.message}`, this, { error: e, scan_path: dirPath, channel_slug: definition.slug })
       return
     }
@@ -61,7 +69,7 @@ function Channel(definition) {
 
   // Add all videos to database
   let addedCount = 0
-  allFiles.forEach(filePath => {
+  const registerVideos = () => allFiles.forEach(filePath => {
     const hash = crypto.createHash('md5').update(filePath).digest('hex')
     const filename = path.basename(filePath, path.extname(filePath))
     const result = db.insertVideo(channelId, filePath, hash, filename)
@@ -70,8 +78,12 @@ function Channel(definition) {
     }
   })
 
+  if (db.db?.transaction) db.db.transaction(registerVideos)()
+  else registerVideos()
+
   // Clean up videos that are no longer on disk
-  const deletedHashes = db.deleteRemovedVideos(this.slug, allFiles)
+  const deletedHashes = scanComplete && allFiles.length > 0 ? db.deleteRemovedVideos(this.slug, allFiles) : []
+  if (!scanComplete) Log(tag, 'Keeping cached library because a media path could not be scanned', this)
   if (deletedHashes.length > 0) {
     Log(tag, `Removed ${deletedHashes.length} videos from database that are no longer on disk`, this)
   }
@@ -89,6 +101,7 @@ function Channel(definition) {
 
   // Start method
   this.start = () => {
+    if (this.started) return
     this.started = true
     // Ensure guide exists for today (will load from history or generate new)
     this.guideGenerator.ensureGuideExists()

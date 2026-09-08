@@ -11,6 +11,7 @@ const playlistManagerPath = require.resolve('../Classes/PlaylistManager.js')
 
 const logs = []
 const insertedVideos = []
+let cleanupCalls = 0
 
 require.cache[databasePath] = {
   id: databasePath,
@@ -22,7 +23,7 @@ require.cache[databasePath] = {
       insertedVideos.push(filePath)
       return { changes: 1 }
     },
-    deleteRemovedVideos: () => []
+    deleteRemovedVideos: () => { cleanupCalls++; return [] }
   })
 }
 
@@ -64,6 +65,7 @@ process.env.SUPPORTED_FORMATS = process.env.SUPPORTED_FORMATS || 'mp4,mkv,avi'
 const { Channel } = require('../Classes/Channel.js')
 
 test('continues scanning remaining paths when one root is missing', () => {
+  cleanupCalls = 0
   logs.length = 0
   insertedVideos.length = 0
 
@@ -85,6 +87,7 @@ test('continues scanning remaining paths when one root is missing', () => {
 
   assert.equal(insertedVideos.length, 1)
   assert.equal(insertedVideos[0], videoPath)
+  assert.equal(cleanupCalls, 0, 'a missing mount must never trigger cache deletion')
 
   const scanFailure = logs.find(
     entry => entry.tag === 'Channel' && entry.message.includes(`Unable to scan path ${missingDir}`)
@@ -139,4 +142,21 @@ test('continues scanning when an early path is unreadable', () => {
     fs.chmodSync(blockedDir, 0o755)
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('rejects channel slugs that can escape cache directories', () => {
+  for (const slug of ['../outside', '.', '__proto__', 'static', 'bad/name']) {
+    assert.throws(() => new Channel({ slug, name: 'Unsafe', paths: ['/media'] }))
+  }
+})
+
+test('scanning terminates when directory symlinks form a cycle', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-symlink-'))
+  fs.writeFileSync(path.join(root, 'video.mp4'), 'test')
+  fs.symlinkSync(root, path.join(root, 'loop'))
+  insertedVideos.length = 0
+  try {
+    new Channel({ slug: 'cycle', name: 'Cycle', type: 'shuffle', paths: [root] })
+    assert.equal(insertedVideos.length, 1)
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })

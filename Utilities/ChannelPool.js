@@ -17,6 +17,7 @@ class ChannelPool {
   }
 
   addChannel(channel) {
+    if (this.getChannelBySlug(channel.slug)) throw new Error(`Duplicate channel slug: ${channel.slug}`)
     this.queue.push(channel)
     Log(tag, 'Added to channel pool.', channel)
   }

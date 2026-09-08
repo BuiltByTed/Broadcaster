@@ -186,14 +186,14 @@ test('keeps media and discontinuity sequences continuous at a program transition
         'EXT-X-MEDIA-SEQUENCE'
     ) + firstSecondSegment
 
-    assert.equal(getTagValue(transitionPlaylist, 'EXT-X-MEDIA-SEQUENCE'), 1)
+    assert.equal(getTagValue(transitionPlaylist, 'EXT-X-MEDIA-SEQUENCE'), 0)
     assert.equal(
         getTagValue(transitionPlaylist, 'EXT-X-DISCONTINUITY-SEQUENCE'),
         0
     )
     assert.match(
         transitionPlaylist,
-        /segment_00004\.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:/
+        /segment_00004\.ts\n#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:[^\n]+\n#EXTINF:/
     )
 
     Date.now.mock.mockImplementation(() => secondEntry.startTime + 1000)
@@ -293,4 +293,60 @@ test('carries sequence offsets across daily guide boundaries', (t) => {
         getTagValue(nextPlaylist, 'EXT-X-MEDIA-SEQUENCE'),
         nextEntrySequence
     )
+})
+
+test('does not double-count a program copied into the next daily guide', t => {
+    const dayStart = 500 * DAY_IN_MILLISECONDS
+    const early = createEntry('early', dayStart, 6)
+    const crossing = createEntry('crossing', dayStart + DAY_IN_MILLISECONDS - 4000, 8)
+    const next = createEntry('next', crossing.endTime, 10)
+    const previousGuide = createGuide(dayStart, [early, crossing])
+    const activeGuide = createGuide(dayStart + DAY_IN_MILLISECONDS, [{ ...crossing }, next])
+    const fixture = createPlaylistFixture(t, { early: [2, 2, 2], crossing: [2, 2, 2, 2], next: [2, 2, 2, 2, 2] })
+    const manager = createPlaylistManager({ PlaylistManager: fixture.PlaylistManager, activeGuide, historicalGuides: [previousGuide], videos: fixture.videos })
+    const before = manager.getEntryTimelinePosition(crossing)
+    const after = manager.getEntryTimelinePosition(next)
+    assert.equal(before.mediaSequence, 3)
+    assert.equal(before.discontinuitySequence, 1)
+    assert.equal(after.mediaSequence, 7)
+    assert.equal(after.discontinuitySequence, 2)
+})
+
+test('uses local calendar days for playlist continuity across daylight saving time', t => {
+    const originalTZ = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    t.after(() => { if (originalTZ === undefined) delete process.env.TZ; else process.env.TZ = originalTZ })
+    for (const [month, day] of [[2, 9], [10, 2]]) {
+        const start = new Date(2025, month, day, 3).getTime()
+        const prevStart = new Date(2025, month, day - 1, 3).getTime()
+        const prev = createEntry('first', start - 4000, 4)
+        const next = createEntry('next', start, 8)
+        const previousGuide = createGuide(prevStart, [prev])
+        const activeGuide = createGuide(start, [next])
+        const fixture = createPlaylistFixture(t, { first: [2, 2], next: [2, 2, 2, 2] })
+        const manager = createPlaylistManager({ PlaylistManager: fixture.PlaylistManager, activeGuide, historicalGuides: [previousGuide], videos: fixture.videos })
+        assert.equal(manager.getEntryTimelinePosition(next).mediaSequence, 2)
+        assert.equal(manager.getEntryTimelinePosition(next).discontinuitySequence, 1)
+    }
+})
+
+test('playlists carry wall-clock start hints, fixed target duration and immutable cached segments', t => {
+    const dayStart = 600 * DAY_IN_MILLISECONDS
+    const first = createEntry('first', dayStart, 8)
+    const next = createEntry('next', first.endTime, 8)
+    const guide = createGuide(dayStart, [first, next])
+    const fixture = createPlaylistFixture(t, { first: [2, 2, 2, 2], next: [2, 2, 2, 2] })
+    const manager = createPlaylistManager({ PlaylistManager: fixture.PlaylistManager, activeGuide: guide, videos: fixture.videos })
+    manager.getAllSegmentsForVideo = fixture.PlaylistManager.prototype.getAllSegmentsForVideo
+    manager.targetDuration = 10
+    t.mock.method(Date, 'now', () => first.startTime + 7000)
+    const a = manager.createRollingPlaylist()
+    assert.match(a, /#EXT-X-START:TIME-OFFSET:7\.000,PRECISE=YES/)
+    assert.match(a, /#EXT-X-PROGRAM-DATE-TIME:/)
+    assert.equal(getTagValue(a, 'EXT-X-TARGETDURATION'), 10)
+    assert.equal(manager.getAllSegmentsForVideo('next', fixture.videos.next)[0].startsDiscontinuity, undefined)
+    Date.now.mock.mockImplementation(() => next.startTime + 1000)
+    const b = manager.createRollingPlaylist()
+    assert.equal(getTagValue(b, 'EXT-X-TARGETDURATION'), 10)
+    assert.doesNotMatch(b, /^#EXT-X-DISCONTINUITY$/m)
 })

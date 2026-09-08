@@ -73,7 +73,7 @@ test('uses cumulative durations for the live segment and target duration', () =>
         const playlist = manager.createRollingPlaylist()
 
         assert.match(playlist, /#EXT-X-TARGETDURATION:10\n/)
-        assert.match(playlist, /#EXT-X-MEDIA-SEQUENCE:7\n/)
+        assert.match(playlist, /#EXT-X-MEDIA-SEQUENCE:0\n/)
         assert.match(playlist, /#EXTINF:10\.000000,\nchannels\/test-channel\/videos\/video-b\/segment_00010\.ts/)
     } finally {
         Date.now = originalNow
@@ -122,8 +122,8 @@ test('keeps the forward segment window full across a video boundary', () => {
         const playlist = manager.createRollingPlaylist()
         const listedSegments = playlist.match(/\.ts$/gm) || []
 
-        assert.equal(listedSegments.length, 19)
-        assert.match(playlist, /#EXT-X-DISCONTINUITY\n#EXTINF:2\.400000,/)
+        assert.equal(listedSegments.length, 22)
+        assert.match(playlist, /#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:[^\n]+\n#EXTINF:2\.400000,/)
         assert.match(playlist, /#EXT-X-TARGETDURATION:3\n/)
     } finally {
         Date.now = originalNow

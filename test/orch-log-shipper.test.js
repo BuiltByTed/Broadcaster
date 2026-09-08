@@ -444,3 +444,31 @@ test('live ingest endpoint accepts a signed batch', { skip: liveConfig.endpointU
     assert.equal(result.sent, 1)
     assert.ok(result.status >= 200 && result.status < 300, `expected 2xx, got ${result.status}`)
 })
+
+
+test('retry timer remains armed during backoff without new log records', async () => {
+    let now = 1000
+    let timer
+    let calls = 0
+    const shipper = new OrchLogShipper({
+        endpointUrl: 'https://logs.example.test', secret: SECRET,
+        now: () => now,
+        setTimeoutImpl: callback => { timer = callback; return { unref() {} } },
+        clearTimeoutImpl: () => {}, writeStderr: () => {},
+        fetchImpl: async () => ({ status: ++calls === 1 ? 503 : 202 })
+    })
+    shipper.enqueue({ msg: 'one record' })
+    timer()
+    await shipper.pending
+    assert.equal(calls, 1)
+    now += 1000
+    timer()
+    await shipper.pending
+    assert.ok(shipper.timer, 'backoff must schedule another retry')
+    now += 30000
+    timer()
+    await shipper.pending
+    assert.equal(calls, 2)
+    assert.equal(shipper.queue.length, 0)
+    await shipper.close()
+})

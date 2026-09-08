@@ -1,11 +1,12 @@
 {
   "name": "broadcaster",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "description": "Node app that generates and hosts HTTP Live Streams from local content using FFMpeg and ExpressJS.",
-  "main": "broadcaster.js",
+  "main": "Broadcaster.js",
   "scripts": {
     "start": "node Broadcaster.js",
     "test": "node --test",
+    "test:playback": "node scripts/playback-smoke.cjs",
     "test:unit": "node --test test/*.test.js",
     "build:frontend": "cd Webapp && npm run build",
     "pm2:start": "pm2 start ecosystem.config.js",
@@ -33,5 +34,8 @@
   "bugs": {
     "url": "https://github.com/theodorecharles/Broadcaster/issues"
   },
-  "homepage": "https://github.com/theodorecharles/Broadcaster#readme"
+  "homepage": "https://github.com/theodorecharles/Broadcaster#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
 }

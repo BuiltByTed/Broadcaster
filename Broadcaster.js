@@ -13,10 +13,11 @@ const { scheduleBackgroundStartup } = require('./Utilities/Startup.js')
 const { CACHE_DIR, CHANNEL_LIST } = process.env
 
 // Support both absolute paths (/data/channels.json) and relative paths (./channels.json)
-const channelsPath = CHANNEL_LIST.startsWith('/') ? CHANNEL_LIST : `.${CHANNEL_LIST}`
+const channelsPath = path.resolve(CHANNEL_LIST || './channels.json')
 
 let uiStarted = false
 
+let shuttingDown = false
 const cleanup = () => {
   Log(tag, 'Cleaning up ...')
   try {
@@ -28,6 +29,9 @@ const cleanup = () => {
 }
 
 const shutdown = async () => {
+  if (shuttingDown) return
+  shuttingDown = true
+  if (uiStarted) TelevisionUI().stop()
   cleanup()
   // Ship the buffered tail before exiting; never let a stuck POST block the stop.
   try {
@@ -66,6 +70,7 @@ function loadChannels() {
 
     const data = fs.readFileSync(channelsPath)
     const channels = JSON.parse(data)
+    if (!Array.isArray(channels)) throw new Error('channels.json must contain an array')
     Log(tag, `Found ${channels.length} channel definition${channels.length > 1 ? 's' : ''}:`)
     return channels
   } catch (e) {

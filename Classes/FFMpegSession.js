@@ -1,5 +1,5 @@
 const Log = require('../Utilities/Log.js')
-const { spawn, execSync } = require('child_process')
+const { spawn, execFileSync } = require('child_process')
 const { CACHE_DIR } = process.env
 const tag = 'FFMpegSession'
 
@@ -32,34 +32,22 @@ function checkNvidiaGPU() {
     if (gpuCheckDone) return hasNvidiaGPU
 
     try {
-        // Run nvidia-smi and check if output contains GPU info
-        // Note: nvidia-smi may return non-zero exit code (e.g., 14) for warnings
-        // like corrupted infoROM, but still work fine for encoding
-        const output = execSync('nvidia-smi', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
-        if (output.includes('NVIDIA-SMI') && output.includes('Driver Version')) {
-            hasNvidiaGPU = true
-            Log(tag, 'NVIDIA GPU detected - hardware acceleration enabled')
-        } else {
-            hasNvidiaGPU = false
-            Log(tag, 'No NVIDIA GPU detected - using software encoding')
-        }
+        // Query the device directly; recent NVIDIA releases changed the human
+        // table from "Driver Version" to "KMD Version".
+        const output = execFileSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'],
+            { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
+        hasNvidiaGPU = Boolean(output.trim()) && !/no devices|failed|error/i.test(output)
     } catch (error) {
-        // Check if nvidia-smi ran but exited with non-zero (e.g., infoROM warning)
-        if (error.stdout && error.stdout.includes('NVIDIA-SMI') && error.stdout.includes('Driver Version')) {
-            hasNvidiaGPU = true
-            Log(tag, 'NVIDIA GPU detected - hardware acceleration enabled')
-        } else {
-            hasNvidiaGPU = false
-            Log(tag, 'No NVIDIA GPU detected - using software encoding')
-        }
+        hasNvidiaGPU = Boolean(error.stdout?.toString().trim()) && !/no devices|failed|error/i.test(error.stdout.toString())
     }
+    Log(tag, hasNvidiaGPU ? 'NVIDIA GPU detected - hardware acceleration enabled' : 'No NVIDIA GPU detected - using software encoding')
 
     gpuCheckDone = true
     return hasNvidiaGPU
 }
 
 function buildFFmpegArgs(file, output, channel) {
-    const useGPU = checkNvidiaGPU()
+    const useGPU = VIDEO_CODEC === 'h264_nvenc' && checkNvidiaGPU()
     const [width, height] = DIMENSIONS.split('x')
 
     // Base input args with GPU decoding if available
@@ -88,7 +76,7 @@ function buildFFmpegArgs(file, output, channel) {
     } else {
         // CPU encoding path — yadif_cuda is not available on CPU, map to yadif
         const cpuFilter = VIDEO_FILTER === 'yadif_cuda' ? 'yadif' : VIDEO_FILTER
-        videoFilter = `${cpuFilter},scale=${DIMENSIONS}`
+        videoFilter = `${cpuFilter ? `${cpuFilter},` : ''}scale=${DIMENSIONS}`
     }
 
     // Build encoding args
@@ -148,7 +136,7 @@ function FFMpegSession(channel) {
     })
 
     ffmpeg.stderr.on('data', (data) => {
-        stderrData += data.toString()
+        stderrData = (stderrData + data.toString()).slice(-32768)
     })
 
     ffmpeg.on('close', (code) => {

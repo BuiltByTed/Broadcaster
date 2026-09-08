@@ -1,5 +1,6 @@
 const Database = require('better-sqlite3')
 const path = require('path')
+const fs = require('fs')
 const Log = require('./Log.js')
 const tag = 'Database'
 
@@ -17,7 +18,9 @@ class DatabaseManager {
         const dbPath = path.join(CACHE_DIR, 'broadcaster.db')
         Log(tag, `Initializing database at ${dbPath}`)
 
+        fs.mkdirSync(path.dirname(dbPath), { recursive: true })
         this.db = new Database(dbPath)
+        this.db.pragma('busy_timeout = 5000')
         this.db.pragma('journal_mode = WAL')
         this.db.pragma('foreign_keys = ON')
 
@@ -77,6 +80,15 @@ class DatabaseManager {
                 ON channels(slug);
         `)
 
+        const columns = this.db.pragma('table_info(videos)')
+        if (!columns.some(column => column.name === 'max_segment_duration')) {
+            this.db.exec('ALTER TABLE videos ADD COLUMN max_segment_duration REAL')
+        }
+
+        if (!columns.some(column => column.name === 'cache_version')) {
+            this.db.exec('ALTER TABLE videos ADD COLUMN cache_version INTEGER NOT NULL DEFAULT 0')
+        }
+
         // Add segment_count column if it doesn't exist (migration for existing DBs)
         try {
             this.db.exec(`ALTER TABLE videos ADD COLUMN segment_count INTEGER`)
@@ -116,7 +128,7 @@ class DatabaseManager {
      * Insert a video (or ignore if already exists)
      */
     insertVideo(channelId, filePath, hash, filename) {
-        const stmt = this.db.prepare(`
+        const stmt = this.insertVideoStatement ||= this.db.prepare(`
             INSERT OR IGNORE INTO videos
                 (channel_id, file_path, hash, filename)
             VALUES (?, ?, ?, ?)
@@ -127,7 +139,7 @@ class DatabaseManager {
     /**
      * Update video transcoding status
      */
-    markVideoTranscoded(videoId, durationSeconds, segmentCount, videoCodec, audioCodec, width, height) {
+    markVideoTranscoded(videoId, durationSeconds, segmentCount, videoCodec, audioCodec, width, height, cacheVersion = 0) {
         const stmt = this.db.prepare(`
             UPDATE videos SET
                 transcoded = 1,
@@ -137,10 +149,19 @@ class DatabaseManager {
                 video_codec = ?,
                 audio_codec = ?,
                 width = ?,
-                height = ?
+                height = ?,
+                cache_version = ?
             WHERE id = ?
         `)
-        return stmt.run(durationSeconds, segmentCount, videoCodec, audioCodec, width, height, videoId)
+        return stmt.run(durationSeconds, segmentCount, videoCodec, audioCodec, width, height, cacheVersion, videoId)
+    }
+
+    updateSegmentMetadata(videoId, parsed) {
+        this.db.prepare(`UPDATE videos SET max_segment_duration = ?, duration_seconds = ?, segment_count = ?
+            WHERE id = ? AND (max_segment_duration IS NULL OR max_segment_duration != ?
+                OR duration_seconds != ? OR segment_count != ?)`).run(
+            parsed.maxDuration, parsed.duration, parsed.segments.length, videoId,
+            parsed.maxDuration, parsed.duration, parsed.segments.length)
     }
 
     /**
@@ -199,7 +220,9 @@ class DatabaseManager {
         return this.db.prepare(`
             SELECT
                 COUNT(*) as total,
-                SUM(CASE WHEN transcoded = 1 THEN 1 ELSE 0 END) as transcoded
+                COALESCE(SUM(CASE WHEN transcoded = 1 THEN 1 ELSE 0 END), 0) as transcoded,
+                MAX(CASE WHEN transcoded = 1 THEN max_segment_duration ELSE 0 END) as maxSegmentDuration,
+                COALESCE(SUM(CASE WHEN cache_version >= 2 AND transcoded = 1 THEN 1 ELSE 0 END), 0) as rebuilt
             FROM videos v
             JOIN channels c ON v.channel_id = c.id
             WHERE c.slug = ?
@@ -226,12 +249,10 @@ class DatabaseManager {
         })
 
         if (deletedHashes.length > 0) {
-            const placeholders = deletedHashes.map(() => '?').join(',')
-            const stmt = this.db.prepare(`
-                DELETE FROM videos
-                WHERE channel_id = ? AND hash IN (${placeholders})
-            `)
-            stmt.run(channel.id, ...deletedHashes)
+            const stmt = this.db.prepare('DELETE FROM videos WHERE channel_id = ? AND hash = ?')
+            this.db.transaction(() => {
+                for (const hash of deletedHashes) stmt.run(channel.id, hash)
+            })()
         }
 
         return deletedHashes

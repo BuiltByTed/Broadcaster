@@ -1,377 +1,101 @@
-# Docker Deployment Guide
+# Broadcaster in Docker
 
-This guide explains how to run Broadcaster in Docker with NVIDIA GPU support for hardware-accelerated video encoding.
+Broadcaster turns local videos into continuously scheduled TV channels with a CRT-style web player. The image is `tedcharles/broadcaster:latest`; the web port is **12121**.
 
-## Prerequisites
+## Run
 
-### Required
-- Docker Engine 20.10+ or Docker Desktop
-- Docker Compose v2.0+
-
-### For GPU Acceleration (Optional but Recommended)
-- NVIDIA GPU (GTX 900 series or newer)
-- NVIDIA Driver 470.57.02+ (Linux) or latest drivers (Windows)
-- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-
-## Quick Start
-
-### 1. Install NVIDIA Container Toolkit (Linux)
-
-```bash
-# Add the package repository
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-
-# Install nvidia-container-toolkit
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
-
-# Restart Docker
-sudo systemctl restart docker
-
-# Verify GPU access
-docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi
-```
-
-### 2. Set Up Directory Structure
-
-```bash
-# Create required directories
-mkdir -p data config media
-
-# Copy example configuration files
-cp config/config.example.txt config/config.txt
-cp config/channels.example.json config/channels.json
-
-# Copy environment file
-cp .env.example .env
-```
-
-### 3. Configure Your Setup
-
-#### Edit `config/channels.json`
-
-Define your channels and media paths:
+Create a writable data directory and put your channel definitions in `data/channels.json`:
 
 ```json
 [
   {
+    "name": "MTV",
+    "slug": "mtv",
     "type": "shuffle",
-    "name": "Movies",
-    "slug": "movies",
-    "paths": [
-      "/media/movies"
-    ]
-  },
-  {
-    "type": "shuffle",
-    "name": "TV Shows",
-    "slug": "tv",
-    "paths": [
-      "/media/tv"
-    ]
+    "paths": ["/media/Music Videos", "/media/TV/Beavis and Butt-Head (1993) {tvdb-75863}"]
   }
 ]
 ```
 
-#### Edit `.env`
+Mount persistent data at `/data` and your media read-only at `/media`. Paths in the channel file refer to paths **inside the container**. The container runs as UID 99 / GID 100; grant that user access to the data directory.
 
-Set your media directory path:
-
-```bash
-# Use relative path
-MEDIA_PATH=./media
-
-# Or absolute path
-MEDIA_PATH=/mnt/storage/media
+```sh
+docker run -d --name broadcaster --restart unless-stopped \
+  --gpus all \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
+  -e TZ=America/New_York \
+  -p 12121:12121 \
+  -v /your/broadcaster-data:/data \
+  -v /your/media:/media:ro \
+  tedcharles/broadcaster:latest
 ```
 
-#### Edit `config/config.txt` (Optional)
+Without NVIDIA hardware, omit the GPU options and set `-e VIDEO_CODEC=libx264 -e VIDEO_PRESET=veryfast`. The app also falls back to software encoding if GPU detection or a GPU encode fails. Unraid installations can use the NVIDIA runtime and the existing Broadcaster template.
 
-Customize encoding settings. Defaults are optimized for NVIDIA GPU:
+The supplied Compose file uses `./data:/data` and `${MEDIA_PATH:-./media}:/media:ro`:
 
-```bash
-VIDEO_CODEC=h264_nvenc     # NVIDIA GPU encoding
-VIDEO_CRF=23               # Quality (18-28)
-VIDEO_PRESET=p4            # Speed vs quality (p1-p7)
-DIMENSIONS=640x480         # Output resolution
+```sh
+docker compose pull
+docker compose up -d
+docker compose logs -f broadcaster
 ```
 
-### 4. Place Your Media
+## Configuration
 
-Copy or symlink your video files into the media directory:
+Environment variables override the image's `config.txt` defaults. An optional read-only mount at `/app/config.txt` can replace that file. Channel definitions live at `/data/channels.json` by default.
 
-```bash
-# Copy files
-cp -r ~/Videos/Movies ./media/movies
-cp -r ~/Videos/TV ./media/tv
+| Variable | Default in the image | Purpose |
+| --- | --- | --- |
+| `CACHE_DIR` | `/data` | Database, guides and cached streams |
+| `CHANNEL_LIST` | `/data/channels.json` | Channel configuration |
+| `WEB_UI_PORT` | `12121` | HTTP port |
+| `VIDEO_CODEC` | `h264_nvenc` | NVIDIA encoding; `libx264` for CPU |
+| `VIDEO_PRESET` | `p4` | NVIDIA preset; use `veryfast` for CPU |
+| `VIDEO_CRF` | `35` | Encoder quality value |
+| `VIDEO_FILTER` | `yadif` | Deinterlacing; CUDA used where compatible |
+| `DIMENSIONS` | `640x480` | Output width; source aspect ratio is preserved |
+| `AUDIO_BITRATE` | `192k` | AAC stereo at 48 kHz |
+| `HLS_SEGMENT_LENGTH_SECONDS` | `1` | Forced keyframe/IDR interval |
+| `GENERATION_WORKERS` | `2` for NVIDIA, `1` for CPU | Background encoders, limited to 1–4 |
+| `TZ` | container timezone | Local 3 a.m. guide boundary |
 
-# Or create symlinks
-ln -s /mnt/storage/movies ./media/movies
-ln -s /mnt/storage/tv ./media/tv
+Channel types are `shuffle` and `alphabetical`. Slugs must contain letters, digits, underscores or hyphens and must be unique. Restart after editing channel definitions.
+
+## Cache upgrade and rebuild
+
+Version 0.1.0 automatically queues legacy HLS for regeneration into `channels/<slug>/videos/<hash>/v2/`. It fixes the old mismatch between the one-second setting and the actual 8–10 second segments. The previous cache remains available while replacements are encoded and checked. On-air schedules retain their selected cache version; newly generated daily schedules use completed replacements. Programs crossing 3 a.m. finish normally.
+
+Do **not** delete the old cache to start the upgrade. Progress survives container restarts. The first rebuild needs space for both versions and may take days for a large library. Encoding stops if free space falls below 5 GiB; free space and restart to resume. Unreadable files are reported separately and retried after their size or modification time changes. Older cache files are retained for rollback and existing schedules.
+
+The guide displays short music and Beavis clips in roughly half-hour blocks, without changing their actual playout order or timing. Titles stay visible while scrolling through long programs. The player refreshes channel availability and guide data automatically.
+
+## Monitoring
+
+- `/healthz`: startup state and deployed Git commit.
+- `/manifest.json`: playable channels.
+- `/api/db-stats`: per-channel cache counts and background generation progress, including failures/skips.
+- `/api/guide?display=1`: compact grouped guide.
+- `/<slug>/schedule`: exact per-video schedule.
+- `/<slug>/debug`: current playback timing without host filesystem paths.
+
+Live playlists are sent with `Cache-Control: no-store`; media segments have a bounded cache lifetime. Reverse proxies should preserve these headers and avoid caching `*.m3u8` or API responses.
+
+## Updates and verification
+
+Pushes to `master` run unit tests, build the frontend, audit dependencies, and test real HLS playback in Chromium before publishing `latest`, `master`, and an immutable `sha-<commit>` tag. Pushes to `devel` publish `dev` after the same checks. Workflows also support manual dispatch.
+
+In Unraid, update **Broadcaster** from the Docker tab. This pulls the published image and recreates the container from its saved template, retaining mounts, GPU settings and configuration.
+
+For development:
+
+```sh
+npm ci
+npm ci --prefix Webapp
+npm test
+npm run build:frontend
+npx playwright install --with-deps chromium
+npm run test:playback
 ```
 
-### 5. Build and Run
-
-```bash
-# Build the image
-docker-compose build
-
-# Start the container
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Check GPU usage (if using NVIDIA)
-nvidia-smi
-```
-
-### 6. Access the Web UI
-
-Open your browser to: http://localhost:12121
-
-## Directory Structure
-
-```
-.
-├── config/              # Configuration files (mounted to /config)
-│   ├── config.txt       # Main configuration
-│   └── channels.json    # Channel definitions
-├── data/                # HLS data (persistent, mounted to /data/hls)
-│   └── hls/
-│       └── broadcaster/
-│           └── channels/
-├── media/               # Your video files (mounted to /media)
-│   ├── movies/
-│   ├── tv/
-│   └── ...
-└── logs/                # Application logs (mounted to /app/logs)
-```
-
-## GPU vs CPU Encoding
-
-### With NVIDIA GPU (Recommended)
-- **Codec**: `h264_nvenc`
-- **Preset**: `p1` (fast) to `p7` (slow/quality)
-- **Performance**: 5-10x faster than CPU
-- **Quality**: Excellent at `p4` or higher
-
-### Without GPU (CPU Fallback)
-- **Codec**: `libx264` (automatic fallback)
-- **Preset**: `ultrafast`, `veryfast`, `fast`, `medium`, etc.
-- **Performance**: Slower but works on any system
-- **Quality**: Excellent at `medium` or slower
-
-The system automatically detects GPU availability and falls back to CPU encoding if no NVIDIA GPU is found.
-
-## Docker Compose Configuration
-
-### GPU Support
-
-The `docker-compose.yml` includes GPU support:
-
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all
-          capabilities: [gpu, video, compute, utility]
-```
-
-### Volume Mounts
-
-Three main volumes:
-- `./data:/data/hls` - Persistent HLS streams
-- `./config:/config` - Configuration files
-- `${MEDIA_PATH}:/media:ro` - Media files (read-only)
-
-### Environment Variables
-
-Override in `docker-compose.yml` or `.env`:
-
-```yaml
-environment:
-  - VIDEO_CODEC=h264_nvenc
-  - VIDEO_PRESET=p4
-  - DIMENSIONS=1280x720
-```
-
-## Common Commands
-
-```bash
-# Start
-docker-compose up -d
-
-# Stop
-docker-compose down
-
-# Restart
-docker-compose restart
-
-# View logs
-docker-compose logs -f
-
-# Rebuild after code changes
-docker-compose build --no-cache
-
-# Shell access
-docker-compose exec broadcaster bash
-
-# Check FFmpeg capabilities
-docker-compose exec broadcaster ffmpeg -encoders | grep nvenc
-
-# Monitor GPU usage
-watch -n 1 nvidia-smi
-```
-
-## Troubleshooting
-
-### GPU Not Detected
-
-1. Verify NVIDIA driver:
-```bash
-nvidia-smi
-```
-
-2. Check Docker GPU access:
-```bash
-docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi
-```
-
-3. Check container logs:
-```bash
-docker-compose logs -f | grep "NVIDIA GPU"
-```
-
-Should see: "NVIDIA GPU detected - hardware acceleration enabled"
-
-### Permission Issues
-
-If you get permission errors accessing media:
-
-```bash
-# Check file permissions
-ls -la media/
-
-# Fix permissions
-chmod -R 755 media/
-```
-
-### FFmpeg Errors
-
-View detailed FFmpeg output:
-
-```bash
-docker-compose logs -f | grep FFMpeg
-```
-
-### Container Won't Start
-
-Check logs for errors:
-
-```bash
-docker-compose logs
-```
-
-Common issues:
-- Missing config files in `config/` directory
-- Invalid paths in `channels.json`
-- Port 12121 already in use
-
-## Performance Optimization
-
-### For NVIDIA GPUs
-
-Higher quality, slower encoding:
-```bash
-VIDEO_PRESET=p7
-VIDEO_CRF=18
-```
-
-Faster encoding, lower quality:
-```bash
-VIDEO_PRESET=p1
-VIDEO_CRF=28
-```
-
-### For CPU Encoding
-
-Faster encoding:
-```bash
-VIDEO_CODEC=libx264
-VIDEO_PRESET=veryfast
-```
-
-Better quality:
-```bash
-VIDEO_CODEC=libx264
-VIDEO_PRESET=medium
-```
-
-## Updating
-
-```bash
-# Pull latest code
-git pull
-
-# Rebuild and restart
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
-```
-
-## Cleanup
-
-```bash
-# Stop and remove container
-docker-compose down
-
-# Remove image
-docker rmi broadcaster:latest
-
-# Clean up HLS cache (optional)
-rm -rf data/hls/*
-
-# Remove all data (CAUTION: Deletes everything)
-rm -rf data/
-```
-
-## Advanced Configuration
-
-### Custom FFmpeg Arguments
-
-Edit `Classes/FFMpegSession.js` to modify FFmpeg arguments.
-
-### Multiple GPUs
-
-To use a specific GPU:
-
-```yaml
-environment:
-  - NVIDIA_VISIBLE_DEVICES=0  # Use first GPU only
-```
-
-### Resource Limits
-
-Add resource limits in `docker-compose.yml`:
-
-```yaml
-deploy:
-  resources:
-    limits:
-      cpus: '4'
-      memory: 8G
-    reservations:
-      memory: 4G
-```
-
-## Support
-
-For issues, please check:
-1. Docker logs: `docker-compose logs`
-2. Application logs: `./logs/`
-3. GitHub Issues: https://github.com/theodorecharles/Broadcaster/issues
+The playback check generates real clips (including a silent source), verifies continuous playback across transitions, channel surfing, network recovery, mobile guide layout and power-off cleanup. `scripts/verify-encode.cjs` can check specific media in a scratch cache, including segment duration, keyframe starts and decoding. It must not be run against the production cache.

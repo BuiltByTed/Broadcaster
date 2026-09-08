@@ -1,9 +1,17 @@
 name: Build and Push Docker Image
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   DOCKER_IMAGE: tedcharles/broadcaster
@@ -16,6 +24,31 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            Webapp/package-lock.json
+
+      - name: Install and verify
+        run: |
+          npm ci
+          npm ci --prefix Webapp
+          npm test
+          npm run build:frontend
+          npm audit --omit=dev
+          npm audit --prefix Webapp
+
+      - name: Verify browser playback
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          npx playwright install --with-deps chromium
+          npm run test:playback
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -32,6 +65,7 @@ jobs:
         with:
           images: ${{ env.DOCKER_IMAGE }}
           tags: |
+            type=sha,format=long
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
@@ -40,12 +74,13 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
+          build-args: DEPLOY_ID=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

@@ -21,7 +21,8 @@ async function runBackgroundStartup({
   log('Checking for pre-generated HLS streams...')
   for (const channel of channelPool.queue) {
     await yieldToEventLoop()
-    preGenerator.queueChannel(channel)
+    await (preGenerator.queueChannelAsync ? preGenerator.queueChannelAsync(channel) : preGenerator.queueChannel(channel))
+    if (channel.start && !channel.started) channel.start()
   }
 
   // Channels will play whatever content is ready while transcoding continues

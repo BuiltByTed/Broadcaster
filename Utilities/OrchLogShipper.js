@@ -164,6 +164,7 @@ class OrchLogShipper {
     async drain(options = {}) {
         this.flushRequested = false
         if (!options.ignoreBackoff && this.now() < this.retryAfter) {
+            this.scheduleFlush()
             return { sent: 0, skipped: 'backoff' }
         }
 
@@ -180,6 +181,10 @@ class OrchLogShipper {
                 if (!result.ok) {
                     // Requeue at the head so ordering survives the retry.
                     this.queue = batch.concat(this.queue)
+                    while (this.queue.length > this.maxQueuedRecords) {
+                        this.queue.pop()
+                        this.droppedRecords++
+                    }
                     this.retryAfter = this.now() + this.retryBackoffMs
                     break
                 }
@@ -206,6 +211,7 @@ class OrchLogShipper {
                 body,
                 signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
             })
+            if (response?.body?.cancel) await response.body.cancel()
             if (!response || response.status < 200 || response.status >= 300) {
                 const status = response ? response.status : 'no-response'
                 this.reportFailure(`ingest rejected ${batch.length} record(s) with status ${status}`)

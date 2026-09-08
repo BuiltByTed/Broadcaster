@@ -1,5 +1,5 @@
 # Build stage for frontend
-FROM node:20-slim AS frontend-builder
+FROM node:24-bookworm-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -11,6 +11,12 @@ RUN cd Webapp && npm ci
 COPY Webapp ./Webapp
 RUN cd Webapp && npm run build
 
+# Install native runtime dependencies with the same Node version as production.
+FROM node:24-bookworm-slim AS backend-builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
 # Runtime stage
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
@@ -21,18 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20.x
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    rm -rf /var/lib/apt/lists/* && \
-    npm cache clean --force
-
-# Create app directory
+# Use the supported Node runtime from the build stage.
+COPY --from=backend-builder /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
-
-# Copy package files and install production dependencies only
-COPY package*.json ./
-RUN npm ci --only=production && npm cache clean --force
+COPY --from=backend-builder /app/node_modules ./node_modules
+COPY package.json ./
 
 # Copy application code (excluding Webapp source, only need built files)
 COPY Classes ./Classes
@@ -46,7 +45,6 @@ COPY Webapp/TelevisionUI.js ./Webapp/
 COPY Webapp/staticAssets.js ./Webapp/
 COPY Webapp/static ./Webapp/static
 COPY Webapp/static-4x3 ./Webapp/static-4x3
-COPY Webapp/static.gif ./Webapp/
 
 # Create broadcaster user with UID 99 (nobody) and GID 100 (users)
 RUN groupadd -g 100 users || true && \
@@ -55,6 +53,9 @@ RUN groupadd -g 100 users || true && \
 # Create directories for volumes with correct ownership
 RUN mkdir -p /data /media && \
     chown -R 99:100 /data /media /app
+
+ARG DEPLOY_ID=local
+ENV DEPLOY_ID=$DEPLOY_ID
 
 # Environment variables
 ENV CACHE_DIR=/data

@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
-import Hls from 'hls.js'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { startPlayback } from './playback.mjs'
+import StaticNoise from './StaticNoise.jsx'
 import './App.css'
 import { cancelChannelSwitch, scheduleChannelSwitch } from './channelSwitch.mjs'
 import {
@@ -30,8 +31,9 @@ function MarqueeTitle({ title }) {
       }
     }
     checkOverflow()
-    window.addEventListener('resize', checkOverflow)
-    return () => window.removeEventListener('resize', checkOverflow)
+    const observer = new ResizeObserver(checkOverflow)
+    if (containerRef.current) observer.observe(containerRef.current)
+    return () => observer.disconnect()
   }, [title])
 
   return (
@@ -47,7 +49,9 @@ function MarqueeTitle({ title }) {
 
 function App() {
   const videoRef = useRef(null)
-  const hlsRef = useRef(null)
+  const playbackCleanupRef = useRef(null)
+  const powerRef = useRef(false)
+  const serverOffsetRef = useRef(0)
   const channelSwitchTimeoutRef = useRef(null)
   const channelOverlayTimeoutRef = useRef(null)
   const channelEntryTimeoutRef = useRef(null)
@@ -64,6 +68,9 @@ function App() {
   const [isPoweredOn, setIsPoweredOn] = useState(false)
   const [currentVolume, setCurrentVolume] = useState(1.0)
   const [showStatic, setShowStatic] = useState(false)
+  const [playbackStatus, setPlaybackStatus] = useState('')
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false)
+  const [guideViewport, setGuideViewport] = useState({ left: 0, width: 1000 })
   const [showChannelOverlay, setShowChannelOverlay] = useState(false)
   const [channelEntryBuffer, setChannelEntryBuffer] = useState('')
   const [channelEntryInvalid, setChannelEntryInvalid] = useState(false)
@@ -72,10 +79,10 @@ function App() {
   const [showGuide, setShowGuide] = useState(false)
   const [guideData, setGuideData] = useState({})
   const [aspectRatio, setAspectRatio] = useState(() => {
-    return localStorage.getItem('tv-aspectRatio') || '16:9'
+    try { return localStorage.getItem('tv-aspectRatio') || '16:9' } catch { return '16:9' }
   })
   const [scanlines, setScanlines] = useState(() => {
-    return localStorage.getItem('tv-scanlines') === 'on'
+    try { return localStorage.getItem('tv-scanlines') === 'on' } catch { return false }
   })
   const [tvSize, setTvSize] = useState({ width: 0, height: 0 })
   const [currentTime, setCurrentTime] = useState(new Date())
@@ -100,10 +107,8 @@ function App() {
   const stopPlaybackSession = () => {
     removeEndedListener()
 
-    if (hlsRef.current) {
-      hlsRef.current.destroy()
-      hlsRef.current = null
-    }
+    playbackCleanupRef.current?.()
+    playbackCleanupRef.current = null
   }
 
   const clearChannelEntry = () => {
@@ -122,6 +127,8 @@ function App() {
       cancelChannelEntry(channelEntryInvalidTimeoutRef)
       clearPlaybackTimeout()
       stopPlaybackSession()
+      clearTimeout(channelOverlayTimeoutRef.current)
+      clearTimeout(volumeOverlayTimeoutRef.current)
     }
   }, [])
 
@@ -132,8 +139,8 @@ function App() {
       const controlsHeight = 80 // approximate height of controls + gap
       const borderWidth = 40 // 20px border on each side
 
-      const availableWidth = window.innerWidth - padding - borderWidth
-      const availableHeight = window.innerHeight - padding - controlsHeight - borderWidth
+      const availableWidth = Math.max(160, window.innerWidth - padding - borderWidth)
+      const availableHeight = Math.max(120, window.innerHeight - padding - controlsHeight - borderWidth)
 
       const ratio = aspectRatio === '4:3' ? 4 / 3 : 16 / 9
 
@@ -163,7 +170,7 @@ function App() {
 
   // Persist settings to localStorage and reload static if playing
   useEffect(() => {
-    localStorage.setItem('tv-aspectRatio', aspectRatio)
+    try { localStorage.setItem('tv-aspectRatio', aspectRatio) } catch {}
     // Reload static channel if currently showing static (channel index -1)
     if (isPoweredOn && currentChannelIndex === -1) {
       playStaticChannel()
@@ -171,25 +178,35 @@ function App() {
   }, [aspectRatio])
 
   useEffect(() => {
-    localStorage.setItem('tv-scanlines', scanlines ? 'on' : 'off')
+    try { localStorage.setItem('tv-scanlines', scanlines ? 'on' : 'off') } catch {}
   }, [scanlines])
 
-  // Load channels
+  // Keep polling: the service can become ready after this page was opened.
   useEffect(() => {
-    fetch('/manifest.json')
-      .then(res => res.json())
-      .then(data => {
-        setChannels(data.channels)
-        console.log('Channels loaded:', data.channels)
-      })
-      .catch(err => console.error('Failed to load channels:', err))
+    const controller = new AbortController()
+    let timer
+    const refresh = async () => {
+      try {
+        const res = await fetch('/manifest.json', { signal: controller.signal, cache: 'no-store' })
+        if (!res.ok) throw new Error('Channels unavailable')
+        const data = await res.json()
+        if (Array.isArray(data.channels)) setChannels(previous => {
+          // Existing channel numbers stay stable as more channels finish encoding.
+          const known = new Set(previous.map(channel => channel.slug))
+          return [...previous, ...data.channels.filter(channel => !known.has(channel.slug))]
+        })
+      } catch (error) { if (error.name !== 'AbortError') console.warn(error.message) }
+      if (!controller.signal.aborted) timer = setTimeout(refresh, 15000)
+    }
+    refresh()
+    return () => { controller.abort(); clearTimeout(timer) }
   }, [])
 
   // Update clock every second when guide is open
   useEffect(() => {
     if (!showGuide) return
     const interval = setInterval(() => {
-      setCurrentTime(new Date())
+      setCurrentTime(new Date(Date.now() + serverOffsetRef.current))
     }, 1000)
     return () => clearInterval(interval)
   }, [showGuide])
@@ -213,84 +230,20 @@ function App() {
     // Update display
     showOverlay(setShowChannelOverlay, channelOverlayTimeoutRef)
 
-    // Load new channel after brief delay
+    setAutoplayBlocked(false)
+    setPlaybackStatus('Tuning…')
+    // Brief coalescing only; no artificial half-second pause on every tune.
     scheduleChannelSwitch(channelSwitchTimeoutRef, () => {
       const video = videoRef.current
-      if (!video) return
-
-      const playlistUrl = `/${channel.slug}.m3u8`
-
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          liveDurationInfinity: true,
-          // Buffer 120 seconds ahead
-          maxBufferLength: 120,
-          maxMaxBufferLength: 180,
-          maxBufferSize: 200 * 1000 * 1000,
-          maxBufferHole: 0.5,
-          // Don't cache played segments
-          backBufferLength: 0,
-          // Play behind live edge to ensure buffer ahead
-          liveSyncDurationCount: 6,
-          liveMaxLatencyDurationCount: 12
-        })
-
-        hls.loadSource(playlistUrl)
-        hls.attachMedia(video)
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(err => console.log('Autoplay blocked:', err))
-          setShowStatic(false)
-        })
-
-        hls.on(Hls.Events.ERROR, (event, data) => {
-          if (data.fatal) {
-            console.error('HLS Error:', data)
-            switch (data.type) {
-              case Hls.ErrorTypes.NETWORK_ERROR:
-                console.log('Network error, trying to recover...')
-                hls.startLoad()
-                break
-              case Hls.ErrorTypes.MEDIA_ERROR:
-                console.log('Media error, trying to recover...')
-                hls.recoverMediaError()
-                break
-              default:
-                setShowStatic(true)
-                break
-            }
-          }
-        })
-
-        // Handle buffer stalls - keep trying to load more content
-        hls.on(Hls.Events.BUFFER_EOS, () => {
-          console.log('Buffer reached end of stream, reloading...')
-          hls.startLoad()
-        })
-
-        hlsRef.current = hls
-
-        // Recovery handlers for playback issues
-        const handleEnded = () => {
-          // Live streams shouldn't end - force reload if this happens
-          console.log('Video ended unexpectedly, restarting stream...')
-          hls.startLoad()
-          video.play().catch(() => {})
-        }
-
-        addEndedListener(video, handleEnded)
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Live/channel playlists must not inherit loop from prior static playback
-        video.loop = false
-        video.src = playlistUrl
-        video.play().catch(err => console.log('Autoplay blocked:', err))
-        setShowStatic(false)
-      }
-
+      if (!video || !powerRef.current) return
       video.volume = currentVolume
-    }, 500)
+      playbackCleanupRef.current = startPlayback({
+        video, url: `/${encodeURIComponent(channel.slug)}.m3u8`,
+        onPlaying: () => setShowStatic(false),
+        onStatus: setPlaybackStatus,
+        onBlocked: setAutoplayBlocked
+      })
+    }, 60)
   }
 
   // Channel navigation
@@ -379,67 +332,23 @@ function App() {
     showOverlay(setShowVolumeOverlay, volumeOverlayTimeoutRef, 1500)
   }
 
-  // Play static channel
+  // Static is generated locally; it does not consume HLS bandwidth or a decoder.
   const playStaticChannel = () => {
     clearPlaybackTimeout()
     stopPlaybackSession()
-
-    const video = videoRef.current
-    if (!video) return
-
-    const playlistUrl = aspectRatio === '4:3'
-      ? '/channels/static-4x3/_.m3u8'
-      : '/channels/static/_.m3u8'
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false,
-        backBufferLength: 90,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        maxBufferSize: 60 * 1000 * 1000,
-        maxBufferHole: 0.5
-      })
-
-      hls.loadSource(playlistUrl)
-      hls.attachMedia(video)
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(err => console.log('Autoplay blocked:', err))
-        setShowStatic(false)
-      })
-
-      hls.on(Hls.Events.ERROR, (event, data) => {
-        if (data.fatal) {
-          console.error('HLS Error:', data)
-          setShowStatic(true)
-        }
-      })
-
-      hlsRef.current = hls
-
-      // Loop static video when it ends
-      const handleStaticEnded = () => {
-        video.currentTime = 0
-        video.play().catch(() => {})
-      }
-      addEndedListener(video, handleStaticEnded)
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = playlistUrl
-      video.loop = true
-      video.play().catch(err => console.log('Autoplay blocked:', err))
-      setShowStatic(false)
-    }
-
-    video.volume = currentVolume
+    setShowStatic(true)
+    setPlaybackStatus(channels.length ? 'Select a channel' : 'Preparing channels…')
   }
 
   // Power toggle
   const togglePower = () => {
     if (isPoweredOn) {
       // Power off
+      powerRef.current = false
       setIsPoweredOn(false)
+      setShowGuide(false)
+      setAutoplayBlocked(false)
+      setPlaybackStatus('')
       setPowerAnimation('power-off')
 
       clearChannelEntry()
@@ -455,6 +364,7 @@ function App() {
       }, 500)
     } else {
       // Power on - play static channel first
+      powerRef.current = true
       setIsPoweredOn(true)
       setPowerAnimation('power-on')
 
@@ -472,54 +382,46 @@ function App() {
     if (!video) return
 
     // iOS Safari uses webkitEnterFullscreen on video element
-    if (video.webkitEnterFullscreen) {
-      video.webkitEnterFullscreen()
-    } else if (!document.fullscreenElement) {
-      video.requestFullscreen()
-    } else {
-      document.exitFullscreen()
-    }
+    const screen = video.closest('.video-wrapper')
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+    else if (screen.requestFullscreen) screen.requestFullscreen().catch(() => {})
+    else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen()
   }
 
-  // TV Guide toggle
   const toggleGuide = () => {
-    if (isPoweredOn) {
-      if (!showGuide) {
-        // Fetch guide data when opening
-        fetch('/api/guide')
-          .then(res => res.json())
-          .then(data => {
-            setGuideData(data)
-            setShowGuide(true)
-
-            // Scroll to current time and current channel after render
-            setTimeout(() => {
-              if (guideRef.current && data.dayStart) {
-                const now = Date.now()
-                const dayStart = data.dayStart
-                const msFromDayStart = now - dayStart
-                const mobile = window.innerWidth <= 600
-                const pxPerMin = mobile ? 5 : 10
-                const pxPerMs = pxPerMin / (60 * 1000)
-                const scrollX = msFromDayStart * pxPerMs - (mobile ? 100 : 200) // Offset to show some past content
-                guideRef.current.scrollLeft = Math.max(0, scrollX)
-
-                // Scroll current channel into view
-                if (channelsRef.current) {
-                  const channelEl = channelsRef.current.querySelector('.guide-channel-name.current')
-                  if (channelEl) {
-                    channelEl.scrollIntoView({ block: 'center' })
-                  }
-                }
-              }
-            }, 100)
-          })
-          .catch(err => console.error('Failed to load guide:', err))
-      } else {
-        setShowGuide(false)
-      }
-    }
+    if (isPoweredOn) setShowGuide(value => !value)
   }
+
+  useEffect(() => {
+    if (!showGuide) return
+    const controller = new AbortController()
+    let timer
+    let initial = true
+    const refresh = async () => {
+      const sent = Date.now()
+      try {
+        const res = await fetch('/api/guide?display=1', { signal: controller.signal, cache: 'no-store' })
+        if (!res.ok) throw new Error('Guide unavailable')
+        const data = await res.json()
+        if (data.serverTime) serverOffsetRef.current = data.serverTime - (sent + Date.now()) / 2
+        setGuideData(data)
+        setCurrentTime(new Date(Date.now() + serverOffsetRef.current))
+        if (initial && data.dayStart) {
+          initial = false
+          requestAnimationFrame(() => {
+            if (controller.signal.aborted || !guideRef.current) return
+            const mobile = window.innerWidth <= 600
+            guideRef.current.scrollLeft = Math.max(0, (Date.now() + serverOffsetRef.current - data.dayStart) / 60000 * (mobile ? 5 : 10) - (mobile ? 50 : 100))
+            setGuideViewport({ left: guideRef.current.scrollLeft, width: guideRef.current.clientWidth })
+            channelsRef.current?.querySelector('.guide-channel-name.current')?.scrollIntoView({ block: 'nearest' })
+          })
+        }
+      } catch (error) { if (error.name !== 'AbortError') console.warn(error.message) }
+      if (!controller.signal.aborted) timer = setTimeout(refresh, 30000)
+    }
+    refresh()
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [showGuide])
 
   // Navigate to channel from guide
   const selectChannelFromGuide = (slug) => {
@@ -545,41 +447,10 @@ function App() {
     return remainMins > 0 ? `${hours}h ${remainMins}m` : `${hours}h`
   }
 
-  // Combine consecutive short shows (< 20 min) with the same title for display
-  const combineShortShows = (schedule) => {
-    const SHORT_THRESHOLD = 20 * 60 // 20 minutes in seconds
-    const combined = []
-
-    for (let i = 0; i < schedule.length; i++) {
-      const show = schedule[i]
-
-      // If this is a short show, try to merge with following short shows of same title
-      if (show.duration < SHORT_THRESHOLD) {
-        let merged = { ...show }
-        let j = i + 1
-
-        while (j < schedule.length &&
-               schedule[j].title === merged.title &&
-               schedule[j].duration < SHORT_THRESHOLD) {
-          merged.endTime = schedule[j].endTime
-          merged.duration += schedule[j].duration
-          merged.isCurrent = merged.isCurrent || schedule[j].isCurrent
-          j++
-        }
-
-        combined.push(merged)
-        i = j - 1 // Skip merged entries
-      } else {
-        combined.push(show)
-      }
-    }
-
-    return combined
-  }
-
   // Sync vertical scroll between channel list and schedule
   const channelsRef = useRef(null)
   const handleScheduleScroll = (e) => {
+    setGuideViewport({ left: e.target.scrollLeft, width: e.target.clientWidth })
     if (channelsRef.current) {
       channelsRef.current.scrollTop = e.target.scrollTop
     }
@@ -634,6 +505,8 @@ function App() {
   // Keyboard controls
   useEffect(() => {
     const handleKeyDown = (e) => {
+      if (e.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName)) return
+      if (e.key === 'Escape') { setShowGuide(false); return }
       if (/^[0-9]$/.test(e.key)) {
         e.preventDefault()
         handleDigitEntry(e.key)
@@ -679,6 +552,18 @@ function App() {
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [isPoweredOn, channels, currentChannelIndex, currentVolume, showGuide])
 
+  const guideChannels = useMemo(() => Object.entries(guideData.channels || {}), [guideData])
+  const now = currentTime.getTime()
+  const pxPerMinute = isMobile ? 5 : 10
+  const guideTicks = []
+  if (guideData.dayStart) {
+    const firstTick = Math.max(0, Math.floor(guideViewport.left / (30 * pxPerMinute)) - 1)
+    const lastTick = Math.ceil((guideViewport.left + guideViewport.width) / (30 * pxPerMinute)) + 1
+    for (let tick = firstTick; tick <= lastTick; tick++) {
+      const time = guideData.dayStart + tick * 30 * 60000
+      if (time <= guideData.dayEnd) guideTicks.push({ time, left: tick * 30 * pxPerMinute })
+    }
+  }
   const currentChannel = channels[currentChannelIndex]
   const overlayChannelLabel = channelEntryBuffer
     ? channelEntryBuffer
@@ -691,23 +576,21 @@ function App() {
     <div className="tv-container">
       <div className="video-wrapper">
         <div
-          className={`video-content ${powerAnimation || ''}`}
+          className={`video-content ${powerAnimation || ''} ${scanlines ? 'crt-enabled' : ''}`}
+          onAnimationEnd={() => setPowerAnimation(null)}
           style={{ width: tvSize.width, height: tvSize.height }}
         >
           <video
             ref={videoRef}
             playsInline
             webkit-playsinline="true"
-            onClick={() => videoRef.current.muted = false}
+            onClick={() => { videoRef.current.muted = false; videoRef.current.play().catch(() => {}) }}
             className={currentChannelIndex === -1 ? 'static-video' : ''}
-            style={{ display: showStatic ? 'none' : 'block' }}
+            style={{ visibility: isPoweredOn ? 'visible' : 'hidden' }}
           />
-          <img
-            src="static.gif"
-            alt="Static"
-            className="static-gif"
-            style={{ display: showStatic ? 'block' : 'none' }}
-          />
+          <StaticNoise active={showStatic && isPoweredOn} />
+          {isPoweredOn && playbackStatus && <div className="playback-status" role="status">{playbackStatus}</div>}
+          {isPoweredOn && autoplayBlocked && <button className="playback-resume" onClick={() => videoRef.current.play().catch(() => {})}>Click to play</button>}
 
           <div
             className={`channel-overlay ${showChannelOverlay ? 'show' : ''} ${channelEntryInvalid ? 'invalid' : ''}`}
@@ -772,11 +655,12 @@ function App() {
                 <div className="guide-time-now">
                   {currentTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
                 </div>
-                <button className="guide-close" onClick={() => setShowGuide(false)}>X</button>
+                <button className="guide-close" aria-label="Close TV guide" onClick={() => setShowGuide(false)}>X</button>
               </div>
               <div className="guide-body">
                 <div className="guide-channels" ref={channelsRef} onScroll={handleChannelsScroll}>
-                  {guideData.channels && Object.entries(guideData.channels).map(([slug, channelData]) => {
+                  <div className="guide-channel-heading">CHANNEL</div>
+                  {guideChannels.map(([slug, channelData]) => {
                     const channelNum = channels.findIndex(c => c.slug === slug) + 1
                     return (
                       <div
@@ -791,33 +675,47 @@ function App() {
                 </div>
                 <div className="guide-schedule-container" ref={guideRef} onScroll={handleScheduleScroll}>
                   <div className="guide-schedule-scroll">
+                    <div className="guide-time-axis">{guideTicks.map(tick => <span key={tick.time} style={{ left: tick.left }}>{formatTime(tick.time)}</span>)}</div>
                     {/* Current time indicator line */}
                     {guideData.dayStart && (
                       <div
                         className="guide-now-line"
-                        style={{ left: (Date.now() - guideData.dayStart) / (60 * 1000) * (isMobile ? 5 : 10) }}
+                        style={{ left: (now - guideData.dayStart) / (60 * 1000) * (isMobile ? 5 : 10) }}
                       />
                     )}
-                    {guideData.channels && Object.entries(guideData.channels).map(([slug, channelData]) => {
+                    {guideChannels.map(([slug, channelData]) => {
                       const pxPerMin = isMobile ? 5 : 10 // 50% scale on mobile
-                      const combinedSchedule = combineShortShows(channelData.schedule)
+                      const combinedSchedule = channelData.schedule.filter(show => {
+                        const left = (show.startTime - guideData.dayStart) / 60000 * pxPerMin
+                        const right = (show.endTime - guideData.dayStart) / 60000 * pxPerMin
+                        return right >= guideViewport.left - 600 && left <= guideViewport.left + guideViewport.width + 600
+                      })
                       return (
-                      <div key={slug} className="guide-channel-row">
+                      <div key={slug} className="guide-channel-row" style={{ minWidth: (guideData.dayEnd - guideData.dayStart) / 60000 * pxPerMin }}>
                         {combinedSchedule.map((show, idx) => {
-                          const now = Date.now()
                           const isCurrent = show.startTime <= now && show.endTime > now
+                          const showLeft = (show.startTime - guideData.dayStart) / 60000 * pxPerMin
+                          const showWidth = show.duration / 60 * pxPerMin
+                          const textInset = Math.max(0, guideViewport.left - showLeft)
+                          const textWidth = Math.max(0, Math.min(showWidth - textInset - 24, guideViewport.width - 24))
                           return (
                           <div
-                            key={idx}
+                            key={`${show.hash}:${show.startTime}`}
+                            role="button" tabIndex={0}
+                            onClick={() => selectChannelFromGuide(slug)}
+                            onKeyDown={event => { if (event.key === 'Enter') selectChannelFromGuide(slug) }}
+                            title={`${show.title} · ${formatTime(show.startTime)}–${formatTime(show.endTime)}`}
                             className={`guide-show ${isCurrent ? 'current' : ''}`}
                             style={{
                               width: show.duration / 60 * pxPerMin,
                               left: (show.startTime - guideData.dayStart) / (60 * 1000) * pxPerMin
                             }}
                           >
+                            <div className="guide-show-info" style={{ transform: `translateX(${textInset}px)`, width: textWidth }}>
                             <div className="guide-show-time">{formatTime(show.startTime)}</div>
                             <MarqueeTitle title={show.title} />
-                            <div className="guide-show-duration">{formatDuration(show.duration)}</div>
+                            <div className="guide-show-duration">{formatDuration(show.duration)}{show.clipCount > 1 ? ` · ${show.clipCount} clips` : ''}</div>
+                            </div>
                           </div>
                         )})}
                       </div>
@@ -828,7 +726,7 @@ function App() {
             </div>
           )}
 
-          {scanlines && <div className="scanlines-overlay"></div>}
+          {scanlines && isPoweredOn && <><div className="scanlines-overlay" /><div className="crt-glass" /></>}
         </div>
       </div>
 
@@ -843,12 +741,12 @@ function App() {
             <path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87-3.13 7-7 7s-7-3.13-7-7c0-2.19 1.01-4.14 2.58-5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9-4.03 9-9c0-2.74-1.23-5.18-3.17-6.83z" fill="currentColor"/>
           </svg>
         </button>
-        <button onClick={channelDown} title="Channel Down">
+        <button onClick={channelDown} title="Channel Down" disabled={!isPoweredOn || channels.length === 0}>
           <svg viewBox="0 0 24 24" width="24" height="24">
             <path d="M7 10l5 5 5-5z" fill="currentColor"/>
           </svg>
         </button>
-        <button onClick={channelUp} title="Channel Up">
+        <button onClick={channelUp} title="Channel Up" disabled={!isPoweredOn || channels.length === 0}>
           <svg viewBox="0 0 24 24" width="24" height="24">
             <path d="M7 14l5-5 5 5z" fill="currentColor"/>
           </svg>

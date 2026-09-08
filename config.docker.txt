@@ -7,14 +7,14 @@ CHANNEL_LIST=/data/channels.json
 # Use h264_nvenc for NVIDIA GPU encoding, libx264 for CPU fallback
 VIDEO_CODEC=h264_nvenc
 VIDEO_CRF=35
-VIDEO_PRESET=fast
+VIDEO_PRESET=p4
 VIDEO_FILTER=yadif
 AUDIO_CODEC=aac
 AUDIO_BITRATE=192k
 DIMENSIONS=640x480
 FFMPEG_SEEK_AHEAD_SECONDS=30
 
-# HLS segment length (Apple recommends 6 seconds)
+# Keyframe-aligned HLS segments; version 2 rebuilds old cache in the background
 HLS_SEGMENT_LENGTH_SECONDS=1
 
 # Supported video formats
