@@ -15,3 +15,10 @@ test('rejects invalid durations, incomplete segments and unsafe URIs', () => {
     assert.throws(() => parseHlsPlaylist(body))
   }
 })
+
+test('normalizes byte ranges so sliding playlists can always use explicit offsets', () => {
+  const parsed = parseHlsPlaylist('#EXTM3U\n#EXTINF:1,\n#EXT-X-BYTERANGE:1880@0\nstream.ts\n#EXTINF:1,\n#EXT-X-BYTERANGE:3760\nstream.ts\n#EXT-X-ENDLIST')
+  assert.deepEqual(parsed.segments.map(segment => segment.byteRange), [{ length: 1880, start: 0 }, { length: 3760, start: 1880 }])
+  assert.throws(() => parseHlsPlaylist('#EXTINF:1,\n#EXT-X-BYTERANGE:100\nstream.ts'))
+  assert.throws(() => parseHlsPlaylist('#EXTINF:1,\n#EXT-X-BYTERANGE:0@0\nstream.ts'))
+})

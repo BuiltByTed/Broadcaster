@@ -48,7 +48,9 @@ async function main() {
     ui.start(pool)
     browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'] })
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+    let partialResponses = 0
     const errors = []
+    page.on('response', response => { if (response.url().endsWith('/stream.ts') && response.status() === 206) partialResponses++ })
     page.on('pageerror', error => errors.push(error.message))
     await page.goto('http://127.0.0.1:12129')
     await page.getByTitle('Power', { exact: true }).click()
@@ -84,7 +86,8 @@ async function main() {
     await page.waitForTimeout(700)
     assert.equal(await page.locator('video').evaluate(video => video.paused), true)
     assert.deepEqual(errors, [])
-    console.log(JSON.stringify({ tuneMs, continuousPlaybackSeconds: later.time - firstTime, visibleGuideCells: cells, browserErrors: errors }))
+    assert.ok(partialResponses > 10, `Expected HTTP byte-range playback, got ${partialResponses} partial responses`)
+    console.log(JSON.stringify({ tuneMs, continuousPlaybackSeconds: later.time - firstTime, visibleGuideCells: cells, partialResponses, browserErrors: errors }))
   } finally {
     await browser?.close()
     ui.stop()

@@ -28,14 +28,23 @@ async function main() {
     assert.ok(playlist.maxDuration <= 1.25, `Long segment: ${playlist.maxDuration}`)
     for (const segment of [playlist.segments[0], playlist.segments.at(-1)]) {
       assert.ok(fs.statSync(path.join(directory, segment.uri)).size > 0)
+      let samplePath = path.join(directory, segment.uri)
+      if (segment.byteRange) {
+        const file = fs.openSync(samplePath, 'r')
+        const data = Buffer.alloc(segment.byteRange.length)
+        fs.readSync(file, data, 0, data.length, segment.byteRange.start)
+        fs.closeSync(file)
+        samplePath = path.join(process.env.CACHE_DIR, 'keyframe-check.ts')
+        fs.writeFileSync(samplePath, data)
+      }
       const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-        '-read_intervals', '%+#1', '-show_frames', '-of', 'json', path.join(directory, segment.uri)], { encoding: 'utf8' }))
+        '-read_intervals', '%+#1', '-show_frames', '-of', 'json', samplePath], { encoding: 'utf8' }))
       assert.equal(probe.frames[0]?.key_frame, 1)
     }
     execFileSync('ffmpeg', ['-v', 'error', '-xerror', '-i', playlistPath, '-t', '5', '-f', 'null', '-'], { timeout: 30000 })
     console.log(JSON.stringify({ file: path.basename(file), segments: playlist.segments.length,
       maxSegmentSeconds: playlist.maxDuration, duration: playlist.duration,
-      encodingSeconds: (Date.now() - started) / 1000, cacheVersion: updated.cache_version }))
+      encodingSeconds: (Date.now() - started) / 1000, mediaFiles: new Set(playlist.segments.map(segment => segment.uri)).size, cacheVersion: updated.cache_version }))
   }
   db.close()
 }

@@ -404,6 +404,16 @@ class PreGenerator {
                 }
             }
 
+            const byteRangeEnds = new Map()
+            for (const segment of parsed.segments) {
+                if (segment.byteRange) byteRangeEnds.set(segment.uri, Math.max(byteRangeEnds.get(segment.uri) || 0, segment.byteRange.start + segment.byteRange.length))
+            }
+            for (const [uri, end] of byteRangeEnds) {
+                if (fs.statSync(path.join(outputDir, uri)).size < end) {
+                    return this.markGenerationIncomplete(db, video, outputDir, fileName, 'Truncated byte-range media')
+                }
+            }
+
             // Verify metadata.json exists - it's only written after successful transcoding
             const metadataPath = path.join(outputDir, 'metadata.json')
             if (!fs.existsSync(metadataPath)) {
@@ -719,6 +729,7 @@ class PreGenerator {
                     if (!video) return resolve({ codec: 'unreadable', probeFailed: true })
                     const audio = streams.find(stream => stream.codec_type === 'audio')
                     resolve({ codec: video.codec_name, width: video.width, height: video.height,
+                        streamIndex: video.index, audioIndex: audio?.index,
                         pixFmt: video.pix_fmt, bitDepth: video.bits_per_raw_sample || '8', audioCodec: audio?.codec_name || 'none' })
                 } catch (_) { resolve({ codec: 'unreadable', probeFailed: true }) }
             })
@@ -800,7 +811,7 @@ class PreGenerator {
                 '-hide_banner', '-nostdin', '-y', '-filter_threads', '2', '-threads', '4',
                 ...inputArgs,
                 ...(videoInfo.audioCodec === 'none' ? ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000'] : []),
-                '-map', '0:v:0', '-map', videoInfo.audioCodec === 'none' ? '1:a:0' : '0:a:0', '-sn', '-dn',
+                '-map', videoInfo.streamIndex == null ? '0:v:0' : `0:${videoInfo.streamIndex}`, '-map', videoInfo.audioCodec === 'none' ? '1:a:0' : (videoInfo.audioIndex == null ? '0:a:0' : `0:${videoInfo.audioIndex}`), '-sn', '-dn',
                 ...(videoInfo.audioCodec === 'none' ? ['-shortest'] : []),
                 '-vf', fullVideoFilter,
                 '-c:v', videoCodec, '-threads', '4',
@@ -813,9 +824,9 @@ class PreGenerator {
                 '-pix_fmt', 'yuv420p',
                 ...audioArgs,
                 '-hls_time', String(segmentSeconds),
-                '-hls_flags', 'independent_segments+temp_file',
+                '-hls_flags', 'independent_segments+single_file',
                 '-hls_list_size', '0',
-                '-hls_segment_filename', path.join(outputDir, 'segment_%05d.ts'),
+                '-hls_segment_filename', path.join(outputDir, 'stream.ts'),
                 '-f', 'hls',
                 outputPath
             ]
@@ -851,6 +862,8 @@ class PreGenerator {
                     const parsed = parseHlsPlaylist(fs.readFileSync(outputPath, 'utf8'))
                     if (!parsed.complete) throw new Error('Encoder did not finalize playlist')
                     if (parsed.maxDuration > segmentSeconds + 0.5) throw new Error(`Segments exceed keyframe interval: ${parsed.maxDuration}s`)
+                    const streamBytes = fs.statSync(path.join(outputDir, 'stream.ts')).size
+                    if (parsed.segments.some(segment => !segment.byteRange || segment.byteRange.start + segment.byteRange.length > streamBytes)) throw new Error('Incomplete byte-range media file')
                     const videoDuration = parsed.duration
                     const segmentCount = parsed.segments.length
 

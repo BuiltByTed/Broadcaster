@@ -235,7 +235,7 @@ class PlaylistManager {
         try {
             const parsed = parseHlsPlaylist(fs.readFileSync(path.join(CACHE_DIR, relativeDir, 'index.m3u8'), 'utf8'))
             const segments = parsed.segments.map((segment, segmentIndex) => ({
-                duration: segment.duration, offset: segment.offset,
+                duration: segment.duration, offset: segment.offset, byteRange: segment.byteRange,
                 path: `${relativeDir}/${segment.uri}`, segmentIndex, videoHash
             }))
             this.segmentCache.set(key, segments)
@@ -315,7 +315,9 @@ class PlaylistManager {
         segments.forEach((segment, index) => {
             if (segment.discontinuity) playlist += '#EXT-X-DISCONTINUITY\n'
             if (index === 0 || segment.discontinuity) playlist += `#EXT-X-PROGRAM-DATE-TIME:${new Date(segment.programTime).toISOString()}\n`
-            playlist += `#EXTINF:${segment.duration.toFixed(6)},\n${segment.path}\n`
+            playlist += `#EXTINF:${segment.duration.toFixed(6)},\n`
+            if (segment.byteRange) playlist += `#EXT-X-BYTERANGE:${segment.byteRange.length}@${segment.byteRange.start}\n`
+            playlist += `${segment.path}\n`
         })
         return playlist
     }

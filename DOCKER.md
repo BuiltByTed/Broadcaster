@@ -64,7 +64,7 @@ Channel types are `shuffle` and `alphabetical`. Slugs must contain letters, digi
 
 ## Cache upgrade and rebuild
 
-Version 0.1.0 automatically queues legacy HLS for regeneration into `channels/<slug>/videos/<hash>/v2/`. It fixes the old mismatch between the one-second setting and the actual 8–10 second segments. The previous cache remains available while replacements are encoded and checked. On-air schedules retain their selected cache version; newly generated daily schedules use completed replacements. Programs crossing 3 a.m. finish normally.
+Version 0.1.0 automatically queues legacy HLS for regeneration into `channels/<slug>/videos/<hash>/v2/`. It fixes the old mismatch between the one-second setting and the actual 8–10 second segments. The new cache uses [HLS byte ranges](https://ffmpeg.org/ffmpeg-formats.html#hls-2): one media file per video, avoiding millions of tiny files while retaining one-second independent chunks. The previous cache remains available while replacements are encoded and checked. On-air schedules retain their selected cache version; newly generated daily schedules use completed replacements. Programs crossing 3 a.m. finish normally.
 
 Do **not** delete the old cache to start the upgrade. Progress survives container restarts. The first rebuild needs space for both versions and may take days for a large library. Encoding stops if free space falls below 5 GiB; free space and restart to resume. Unreadable files are reported separately and retried after their size or modification time changes. Older cache files are retained for rollback and existing schedules.
 
