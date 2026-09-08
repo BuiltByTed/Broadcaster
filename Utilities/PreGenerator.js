@@ -6,6 +6,7 @@ const Log = require('./Log.js')
 const Database = require('./Database.js')
 const { parseHlsPlaylist } = require('./HlsPlaylist.js')
 const tag = 'PreGenerator'
+const { timingCandidate, confirmTimingRepair } = require('./MediaTiming.js')
 const HLS_CACHE_VERSION = 2
 
 const { CACHE_DIR,
@@ -718,24 +719,36 @@ class PreGenerator {
         }
     }
 
-    async probeVideo(filePath) {
-        return new Promise(resolve => {
-            const probe = execFile('ffprobe', ['-v', 'error', '-show_streams', '-of', 'json', filePath],
-                { encoding: 'utf8', timeout: 15000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
-                if (error) return resolve({ codec: 'unreadable', probeFailed: true, probeError: this.describeProbeFailure(error) })
-                try {
-                    const streams = JSON.parse(stdout).streams || []
-                    const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic)
-                    if (!video) return resolve({ codec: 'unreadable', probeFailed: true })
-                    const audio = streams.find(stream => stream.codec_type === 'audio')
-                    resolve({ codec: video.codec_name, width: video.width, height: video.height,
-                        streamIndex: video.index, audioIndex: audio?.index,
-                        pixFmt: video.pix_fmt, bitDepth: video.bits_per_raw_sample || '8', audioCodec: audio?.codec_name || 'none' })
-                } catch (_) { resolve({ codec: 'unreadable', probeFailed: true }) }
+    async probeJson(filePath, extraArgs = []) {
+        return new Promise((resolve, reject) => {
+            const probe = execFile('ffprobe', ['-v', 'error', ...extraArgs, '-show_streams', '-of', 'json', filePath],
+                { encoding: 'utf8', timeout: extraArgs.length ? 120000 : 15000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
+                if (error) return reject(error)
+                try { resolve(JSON.parse(stdout)) } catch (error) { reject(error) }
             })
             this.activeProcesses.add(probe)
             probe.once('close', () => this.activeProcesses.delete(probe))
         })
+    }
+
+    async probeVideo(filePath) {
+        try {
+            const streams = (await this.probeJson(filePath)).streams || []
+            const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic)
+            if (!video) return { codec: 'unreadable', probeFailed: true }
+            const audio = streams.find(stream => stream.codec_type === 'audio')
+            const candidate = timingCandidate(video, audio)
+            let timingRepair = null
+            if (candidate) {
+                const counted = await this.probeJson(filePath, ['-select_streams', String(video.index), '-count_packets'])
+                timingRepair = confirmTimingRepair(candidate, counted.streams?.[0]?.nb_read_packets)
+            }
+            return { codec: video.codec_name, width: video.width, height: video.height,
+                streamIndex: video.index, audioIndex: audio?.index, timingRepair,
+                pixFmt: video.pix_fmt, bitDepth: video.bits_per_raw_sample || '8', audioCodec: audio?.codec_name || 'none' }
+        } catch (error) {
+            return { codec: 'unreadable', probeFailed: true, probeError: this.describeProbeFailure(error) }
+        }
     }
 
     /**
@@ -777,6 +790,7 @@ class PreGenerator {
             // Log video info before transcoding
             Log(tag, `Processing ${baseName} [${videoInfo.codec} ${videoInfo.width}x${videoInfo.height} ${videoInfo.pixFmt} ${videoInfo.bitDepth}bit | audio: ${videoInfo.audioCodec}]`, channel)
 
+            if (videoInfo.timingRepair) Log(tag, `Repairing stretched video timestamps at ${videoInfo.timingRepair.fps} fps`, channel)
             const hasGPU = !options.forceCpu && checkNvidiaGPU()
             const [width] = (DIMENSIONS || '640x480').split('x')
 
@@ -812,8 +826,9 @@ class PreGenerator {
                 ...inputArgs,
                 ...(videoInfo.audioCodec === 'none' ? ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000'] : []),
                 '-map', videoInfo.streamIndex == null ? '0:v:0' : `0:${videoInfo.streamIndex}`, '-map', videoInfo.audioCodec === 'none' ? '1:a:0' : (videoInfo.audioIndex == null ? '0:a:0' : `0:${videoInfo.audioIndex}`), '-sn', '-dn',
-                ...(videoInfo.audioCodec === 'none' ? ['-shortest'] : []),
-                '-vf', fullVideoFilter,
+                '-shortest', '-af', 'apad',
+                '-vf', (videoInfo.timingRepair ? `setpts=N/(${videoInfo.timingRepair.fps}*TB),` : '') + fullVideoFilter,
+                ...(videoInfo.timingRepair ? ['-r', String(videoInfo.timingRepair.fps)] : []),
                 '-c:v', videoCodec, '-threads', '4',
                 '-preset', videoPreset,
                 ...qualityArgs,
@@ -865,6 +880,7 @@ class PreGenerator {
                     const streamBytes = fs.statSync(path.join(outputDir, 'stream.ts')).size
                     if (parsed.segments.some(segment => !segment.byteRange || segment.byteRange.start + segment.byteRange.length > streamBytes)) throw new Error('Incomplete byte-range media file')
                     const videoDuration = parsed.duration
+                    if (videoInfo.timingRepair && Math.abs(videoDuration - videoInfo.timingRepair.duration) > Math.max(2, videoInfo.timingRepair.duration * 0.01)) throw new Error('Repaired video does not match its frame-count duration')
                     const segmentCount = parsed.segments.length
 
                     // Store metadata
@@ -874,6 +890,7 @@ class PreGenerator {
                         generatedAt: new Date().toISOString(),
                         duration: videoDuration,
                         encodingSeconds: duration,
+                        timingRepair: videoInfo.timingRepair || null,
                         maxSegmentDuration: parsed.maxDuration,
                         cacheVersion: HLS_CACHE_VERSION,
                         segmentCount: segmentCount

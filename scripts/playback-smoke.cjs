@@ -7,7 +7,7 @@ const { chromium } = require('@playwright/test')
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-playback-'))
 Object.assign(process.env, { CACHE_DIR: scratch, WEB_UI_PORT: '12129', VIDEO_CODEC: 'libx264',
   VIDEO_PRESET: 'ultrafast', VIDEO_FILTER: '', DIMENSIONS: '320x180', HLS_SEGMENT_LENGTH_SECONDS: '1',
-  SUPPORTED_FORMATS: 'mp4', LOG_LEVEL: 'silent' })
+  SUPPORTED_FORMATS: 'mp4,mkv', LOG_LEVEL: 'silent' })
 const { Channel } = require('../Classes/Channel.js')
 const Database = require('../Utilities/Database.js')
 const encoder = require('../Utilities/PreGenerator.js')
@@ -26,11 +26,18 @@ async function main() {
         ...(i ? [] : ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000']),
         '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', path.join(root, `clip${i}.mp4`)])
     }
+    // Reproduce a damaged source clock: 8 seconds of video stretched to 100.
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=green:s=320x180:r=25:d=8',
+      '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=8',
+      '-vf', 'setpts=12.5*PTS', '-fps_mode', 'passthrough', '-c:v', 'libx264', '-preset', 'ultrafast',
+      '-c:a', 'aac', path.join(root, 'clip2.mkv')])
     for (const slug of ['mtv', 'tv2']) {
       const channel = new Channel({ slug, name: slug === 'mtv' ? 'MTV' : 'Second Channel', type: 'alphabetical', paths: [root] })
       pool.addChannel(channel)
       for (const row of Database().getChannelVideos(slug)) await encoder.generateVideo(row.id, row.file_path, channel)
       const videos = Database().getChannelVideos(slug, true)
+      assert.equal(videos.length, 3)
+      for (const video of videos) assert.ok(Math.abs(video.duration_seconds - 8) < 0.2, `Unexpected repaired duration: ${video.duration_seconds}`)
       const now = Date.now()
       let time = now - 16000
       const schedule = Array.from({ length: 100 }, (_, i) => {
@@ -41,7 +48,7 @@ async function main() {
           duration: video.duration_seconds, segmentCount: video.segment_count, cacheVersion: 2 }
       })
       channel.guideGenerator.saveGuide({ version: 3, channelSlug: slug, dayStart: getPrevious3am(), dayEnd: getNext3am(),
-        schedule, shuffleState: { videoCount: 2, remaining: [] } })
+        schedule, shuffleState: { videoCount: 3, remaining: [] } })
       channel.start()
       // Old caches can have 25+ second segments, requiring a much longer
       // forward window. Playback must still match wall clock, not its edge.

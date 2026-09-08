@@ -70,6 +70,8 @@ Do **not** delete the old cache to start the upgrade. Progress survives containe
 
 The guide displays short music and Beavis clips in roughly half-hour blocks, without changing their actual playout order or timing. Titles stay visible while scrolling through long programs. The player refreshes channel availability and guide data automatically.
 
+The encoder can repair severely stretched source video timestamps when an independent packet count at the declared frame rate agrees with the audio duration. It preserves the source file and records the repair in cache metadata. Short audio tracks are padded with silence so playback remains continuous through the end of the video.
+
 ## Monitoring
 
 - `/healthz`: startup state and deployed Git commit.
