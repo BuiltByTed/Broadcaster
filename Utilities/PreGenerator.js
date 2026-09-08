@@ -786,6 +786,15 @@ class PreGenerator {
                 return
             }
 
+            if (videoInfo.timingRepair) {
+                const marker = path.join(path.dirname(outputDir), 'invalid-cache.json')
+                fs.mkdirSync(path.dirname(marker), { recursive: true })
+                fs.writeFileSync(marker, JSON.stringify({ reason: 'stretched_source_timestamps', timingRepair: videoInfo.timingRepair }))
+                Database().markVideoNotTranscoded(videoId)
+                channel.guideGenerator?.invalidateCache()
+                channel.playlistManager?.invalidateCache()
+            }
+
             // Create output directory only when we intend to encode
             fs.mkdirSync(outputDir, { recursive: true })
 
@@ -919,6 +928,9 @@ class PreGenerator {
                     } catch (dbErr) {
                         throw dbErr
                     }
+
+                    const invalidMarker = path.join(path.dirname(outputDir), 'invalid-cache.json')
+                    if (fs.existsSync(invalidMarker)) fs.unlinkSync(invalidMarker)
 
                     // Invalidate playlist cache so newly transcoded video appears
                     if (channel.playlistManager) {

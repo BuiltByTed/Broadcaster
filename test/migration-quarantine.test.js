@@ -1,0 +1,30 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+
+test('startup migration cannot resurrect a quarantined legacy stream', t => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-quarantine-'))
+  process.env.CACHE_DIR = scratch
+  const db = require('../Utilities/Database')()
+  t.after(() => { db.close(); fs.rmSync(scratch, { recursive: true, force: true }) })
+  const id = db.upsertChannel('tv', 'TV', 'shuffle')
+  const hash = '0123456789abcdef0123456789abcdef'
+  db.insertVideo(id, '/media/show.mkv', hash, 'show')
+  const directory = path.join(scratch, 'channels/tv/videos', hash)
+  fs.mkdirSync(directory, { recursive: true })
+  fs.writeFileSync(path.join(directory, 'index.m3u8'), '#EXTM3U\n#EXTINF:10,\nsegment_00000.ts\n#EXT-X-ENDLIST\n')
+  fs.writeFileSync(path.join(directory, 'metadata.json'), '{}')
+  fs.writeFileSync(path.join(directory, 'invalid-cache.json'), '{"reason":"stretched_source_timestamps"}')
+  const { migrateExistingVideos } = require('../Utilities/MigrateDatabase')
+  assert.equal(migrateExistingVideos('tv'), 0)
+  assert.equal(db.getVideoByHash('tv', hash).transcoded, 0)
+  // Simulate interruption between writing the marker and clearing the DB flag.
+  db.markVideoTranscoded(db.getVideoByHash('tv', hash).id, 10, 1, null, null, null, null)
+  assert.equal(migrateExistingVideos('tv'), 0)
+  assert.equal(db.getVideoByHash('tv', hash).transcoded, 0)
+  fs.unlinkSync(path.join(directory, 'invalid-cache.json'))
+  assert.equal(migrateExistingVideos('tv'), 1)
+  assert.equal(db.getVideoByHash('tv', hash).transcoded, 1)
+})

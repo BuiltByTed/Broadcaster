@@ -24,12 +24,14 @@ function migrateExistingVideos(channelSlug) {
     let migratedCount = 0
 
     videos.forEach(video => {
-        // Skip if already marked as transcoded
-        if (video.transcoded) {
+        const videoDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', video.hash)
+        // Keep quarantine durable even if shutdown interrupted its DB update.
+        if (fs.existsSync(path.join(videoDir, 'invalid-cache.json'))) {
+            if (video.transcoded) db.markVideoNotTranscoded(video.id)
             return
         }
+        if (video.transcoded) return
 
-        const videoDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', video.hash)
         const playlistPath = path.join(videoDir, 'index.m3u8')
         const metadataPath = path.join(videoDir, 'metadata.json')
 
