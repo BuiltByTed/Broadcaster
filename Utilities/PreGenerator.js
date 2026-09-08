@@ -851,6 +851,9 @@ class PreGenerator {
                 ...audioArgs,
                 '-hls_time', String(segmentSeconds),
                 '-hls_flags', 'independent_segments+single_file',
+                // Cached videos are published only after completion. Write the
+                // growing VOD index once, avoiding quadratic playlist rewrites.
+                '-hls_playlist_type', 'vod',
                 '-hls_list_size', '0',
                 '-hls_segment_filename', path.join(outputDir, 'stream.ts'),
                 '-f', 'hls',
