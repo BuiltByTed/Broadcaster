@@ -609,6 +609,8 @@ class PreGenerator {
             }
         }
 
+        // Restore missing or quarantined streams before rebuilding healthy ones.
+        channelQueue.sort((a, b) => Number(transcodedPaths.has(a.filePath)) - Number(transcodedPaths.has(b.filePath)))
         if (channelQueue.length > 0) {
             this.channelQueues.push(channelQueue)
         }

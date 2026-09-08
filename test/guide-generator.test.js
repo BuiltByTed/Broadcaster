@@ -5,7 +5,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-test('regenerates a persisted guide that references a removed video', (t) => {
+test('regenerates stale guides after removals or repaired source clocks', (t) => {
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-guide-test-'))
   const databasePath = require.resolve('../Utilities/Database.js')
   const guideGeneratorPath = require.resolve('../Utilities/GuideGenerator.js')
@@ -89,6 +89,21 @@ test('regenerates a persisted guide that references a removed video', (t) => {
   assert.equal(activeGuide.schedule[0].hash, currentHash)
   assert.equal(savedGuide.schedule[0].hash, currentHash)
   assert.notEqual(savedGuide.generatedAt, staleGuide.generatedAt)
+
+  // A corrected video clock must replace the old multi-hour schedule and
+  // must not carry its invalid overlap forward from yesterday.
+  currentVideos[0].duration_seconds = 3600
+  currentVideos[0].cache_version = 2
+  const previousDay = new Date(dayStart)
+  previousDay.setDate(previousDay.getDate() - 1)
+  generator.saveGuide({ ...savedGuide, dayStart: previousDay.getTime(), schedule: [{
+    ...savedGuide.schedule[0], startTime: dayStart - 3600000,
+    endTime: dayStart + 23 * 3600000
+  }] })
+  const repairedGuide = new GuideGenerator(channel).getActiveGuide()
+  assert.equal(repairedGuide.schedule[0].startTime, dayStart)
+  assert.equal(repairedGuide.schedule[0].duration, 3600)
+  assert.equal(repairedGuide.schedule[0].cacheVersion, 2)
 
   currentVideos = []
   fs.writeFileSync(guidePath, JSON.stringify(staleGuide))

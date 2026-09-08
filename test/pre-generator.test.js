@@ -169,6 +169,18 @@ test('queues a legacy rebuild while keeping its complete cache playable', t => {
     assert.deepEqual(updates, [])
 })
 
+test('restores missing streams before upgrading healthy legacy caches', t => {
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-priority-'))
+    t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))
+    const rows = [{ id: 1, file_path: '/media/healthy.mp4', transcoded: 1, cache_version: 0 },
+        { id: 2, file_path: '/media/quarantined.mp4', transcoded: 0, cache_version: 0 }]
+    const encoder = loadPreGenerator(cacheDir, { getChannelVideos: (_, ready) => ready ? rows.slice(0, 1) : rows })
+    encoder.isMarkedUnreadable = () => false
+    encoder.isAlreadyGenerated = () => true
+    encoder.queueChannel({ slug: 'priority' })
+    assert.deepEqual(encoder.channelQueues[0].map(video => video.videoId), [2, 1])
+})
+
 test('resolveEncodeSettings passes VIDEO_CODEC for videotoolbox, qsv, and libx264', t => {
     const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-cache-'))
     t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))

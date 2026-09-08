@@ -7,6 +7,13 @@ const { describeVideo, groupSchedule } = require('./GuideDisplay.js')
 const tag = 'GuideGenerator'
 const { CACHE_DIR } = process.env
 
+// Normal cache upgrades preserve on-air timing. A repaired clock can change
+// duration by hours and must not retain the invalid legacy schedule.
+function hasRepairedTiming(entry, video) {
+  return video && (video.cache_version || 0) > (entry.cacheVersion || 0) &&
+    Math.abs(video.duration_seconds - entry.duration) > Math.max(2, entry.duration * 0.05)
+}
+
 // Fisher-Yates shuffle for uniform randomization
 function shuffleArray(array) {
   const shuffled = [...array]
@@ -92,6 +99,11 @@ class GuideGenerator {
     const missingEntry = guide.schedule.find(entry => !currentHashes.has(entry.hash))
     if (missingEntry) {
       return `scheduled video ${missingEntry.hash} is no longer available`
+    }
+
+    const videosByHash = new Map(videos.map(video => [video.hash || crypto.createHash('md5').update(video.file_path).digest('hex'), video]))
+    if (guide.schedule.some(entry => hasRepairedTiming(entry, videosByHash.get(entry.hash)))) {
+      return 'scheduled video duration was repaired'
     }
 
     const savedVideoCount = guide.shuffleState && guide.shuffleState.videoCount
@@ -192,7 +204,7 @@ class GuideGenerator {
 
     if (prevGuide && prevGuide.schedule && prevGuide.schedule.length > 0) {
       const lastEntry = prevGuide.schedule[prevGuide.schedule.length - 1]
-      if (lastEntry.endTime > dayStart && videos.some(video => video.file_path === lastEntry.filePath)) {
+      if (lastEntry.endTime > dayStart && videos.some(video => video.file_path === lastEntry.filePath && !hasRepairedTiming(lastEntry, video))) {
         scheduleStart = lastEntry.endTime
         overlappingEntry = lastEntry
         Log(tag, `Previous video extends ${Math.round((lastEntry.endTime - dayStart) / 1000)}s past 3am`, this.channel)
