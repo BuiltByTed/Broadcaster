@@ -20,12 +20,17 @@ async function main() {
   try {
     const root = path.join(scratch, 'Music Videos')
     fs.mkdirSync(root)
+    const captionFile = path.join(root, 'clip0.en.srt')
+    fs.writeFileSync(captionFile, '1\n00:00:00,000 --> 00:00:08,000\nCLASSIC TV CAPTIONS\nSecond line\n')
     for (let i = 0; i < 2; i++) {
       // The second clip has no source audio, exercising generated silent AAC.
       execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=${i ? 'blue' : 'red'}:s=320x180:r=25`,
-        ...(i ? [] : ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000']),
-        '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', path.join(root, `clip${i}.mp4`)])
+        ...(i ? ['-i', captionFile] : ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000']),
+        '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-c:s', 'mov_text', path.join(root, `clip${i}.mp4`)])
     }
+    // Check real external and embedded subtitle conversion without transcoding video.
+    const { extract } = require('../Utilities/Subtitles.js')
+    for (let i = 0; i < 2; i++) assert.match(await extract(path.join(root, `clip${i}.mp4`)), /CLASSIC TV CAPTIONS/)
     // Reproduce a damaged source clock: 8 seconds of video stretched to 100.
     execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=green:s=320x180:r=25:d=8',
       '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=48000:duration=8',
@@ -83,6 +88,10 @@ async function main() {
     assert.ok(Number.isFinite(firstProgramTime), 'Expected broadcast timestamp')
     const clockErrorSeconds = (firstProgramTime + later.time * 1000 - Date.now()) / 1000
     assert.ok(Math.abs(clockErrorSeconds) < 3, `Picture is ${clockErrorSeconds}s away from the guide clock`)
+    await page.getByRole('button', { name: 'Closed captions', exact: true }).click()
+    await page.waitForSelector('.closed-captions', { timeout: 20000 })
+    assert.match(await page.locator('.closed-captions').innerText(), /CLASSIC TV CAPTIONS/)
+    await page.screenshot({ path: '/tmp/broadcaster-captions.png' })
     await page.getByTitle('TV Guide', { exact: true }).click()
     await page.waitForSelector('.guide-show')
     const cells = await page.locator('.guide-show').count()
@@ -92,6 +101,18 @@ async function main() {
     await page.getByLabel('Close TV guide').click()
     for (let i = 0; i < 8; i++) await page.getByTitle('Channel Up', { exact: true }).click({ delay: 5 })
     await page.waitForFunction(() => { const v = document.querySelector('video'); return !document.querySelector('.playback-status') && !v.paused && v.readyState >= 3 })
+    // Adjacent-channel warmup removes the manifest + fragment network round trips.
+    await page.waitForTimeout(5000)
+    const session = await page.context().newCDPSession(page)
+    await session.send('Network.enable')
+    await session.send('Network.emulateNetworkConditions', { offline: false, latency: 400, downloadThroughput: 5000000, uploadThroughput: 5000000 })
+    const warmStarted = Date.now()
+    await page.getByTitle('Channel Down', { exact: true }).click()
+    await page.waitForFunction(() => { const v = document.querySelector('video'); return !v.paused && v.readyState >= 3 && document.querySelector('.static-noise').hidden })
+    const warmTuneMs = Date.now() - warmStarted
+    assert.ok(warmTuneMs < 1200, `Warmed tune with 400ms network latency took ${warmTuneMs}ms`)
+    await session.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 })
+    await session.detach()
     // Force a connection failure and verify that the same channel resumes.
     await page.context().setOffline(true)
     await page.waitForTimeout(3000)
@@ -107,7 +128,7 @@ async function main() {
     assert.equal(await page.locator('video').evaluate(video => video.paused), true)
     assert.deepEqual(errors, [])
     assert.ok(partialResponses > 10, `Expected HTTP byte-range playback, got ${partialResponses} partial responses`)
-    console.log(JSON.stringify({ tuneMs, clockErrorSeconds, continuousPlaybackSeconds: later.time - firstTime, visibleGuideCells: cells, partialResponses, browserErrors: errors }))
+    console.log(JSON.stringify({ tuneMs, warmTuneMs, clockErrorSeconds, continuousPlaybackSeconds: later.time - firstTime, visibleGuideCells: cells, partialResponses, browserErrors: errors }))
   } finally {
     await browser?.close()
     ui.stop()

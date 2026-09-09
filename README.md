@@ -71,6 +71,6 @@ Channels will appear in the web UI as their videos finish transcoding.
 
 ## Playback and guide improvements
 
-The player tunes immediately, recovers interrupted streams, and renders procedural static and optional CRT scanlines, phosphor texture and glass shading. The guide groups short music/Beavis clips into readable blocks and renders only the visible part of the schedule.
+The player preloads adjacent channels for fast switching, recovers interrupted streams, and renders procedural static with optional square-cornered CRT scanlines, phosphor texture and glass shading. Automatic framing removes baked-in 4:3 side bars while preserving widescreen letterboxing. The CC button enables classic TV captions from external or embedded text subtitles, including Plex downloads. The guide groups short music/Beavis clips into readable blocks and renders only the visible part of the schedule.
 
 Release 0.1.0 automatically rebuilds old HLS into a separate cache with forced one-second keyframes. Channels keep playing during the rebuild; existing schedules retain their cache version and new daily schedules adopt completed replacements. See [DOCKER.md](DOCKER.md) for configuration, progress monitoring and deployment details.

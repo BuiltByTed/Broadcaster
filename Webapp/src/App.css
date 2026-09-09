@@ -13,7 +13,7 @@
   position: relative;
   background: #111;
   border: 20px solid #333;
-  border-radius: 20px;
+  border-radius: 0;
   box-shadow: 0 5px 20px rgba(0, 0, 0, 0.5);
   overflow: hidden;
 }
@@ -212,12 +212,17 @@ video::-webkit-media-controls-picture-in-picture-button {
 
 @media (max-width: 600px) {
   .controls {
-    gap: 6px;
-    padding: 8px 10px;
+    gap: 4px;
+    padding: 8px 6px;
+    box-sizing: border-box;
+    width: 100%;
   }
 
   .controls button {
-    padding: 6px 8px;
+    padding: 6px 3px;
+    flex: 1;
+    min-width: 0;
+    min-height: 36px;
   }
 
   .controls button svg {
@@ -784,10 +789,9 @@ video::-webkit-media-controls-picture-in-picture-button {
 }
 .crt-glass {
   position: absolute; inset: 0; z-index: 41; pointer-events: none;
-  border-radius: 3% / 4%;
-  background: radial-gradient(ellipse at center, transparent 48%, #0005 85%, #000a 100%),
-    linear-gradient(125deg, #ffffff08, transparent 40%);
-  box-shadow: inset 0 0 28px #0009;
+  border-radius: 0;
+  background: linear-gradient(125deg, #ffffff08, transparent 40%);
+  box-shadow: inset 0 0 16px #0007;
 }
 .playback-status, .playback-resume {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -825,7 +829,7 @@ video::-webkit-media-controls-picture-in-picture-button {
   .video-wrapper.guide-open {
     position: fixed; inset: 0; z-index: 100;
     width: 100vw; height: 100dvh; box-sizing: border-box;
-    border-width: 8px; border-radius: 14px;
+    border-width: 8px; border-radius: 0;
   }
   .guide-open .video-content { width: 100% !important; height: 100% !important; }
   .guide-header { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; padding: 10px; }
@@ -844,3 +848,10 @@ video::-webkit-media-controls-picture-in-picture-button {
   .guide-show-title { font-size: 14px; }
   .guide-show-duration { display: block; font-size: 11px; margin-top: 4px; }
 }
+
+.picture-window { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); overflow: hidden; container-type: inline-size; }
+.closed-captions { position: absolute; z-index: 42; left: 6%; right: 6%; bottom: 7%; text-align: center; pointer-events: none; color: #fff; font: 700 clamp(12px, 3.5cqw, 34px)/1.25 "Courier New", Courier, monospace; letter-spacing: 0.01em; text-shadow: 1px 1px #000; }
+.closed-captions div { white-space: pre-wrap; }
+.closed-captions span { background: #000; padding: 0.03em 0.22em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.controls .cc-button { font: bold 16px monospace; }
+.controls .cc-button.active { color: #c4ffd0; border-color: #70cf89; box-shadow: inset 0 0 0 1px #70cf89; }

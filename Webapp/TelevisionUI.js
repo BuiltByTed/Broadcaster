@@ -253,6 +253,40 @@ class TelevisionUI {
         res.json(guide)
     })
 
+    // Caption identity follows the raw playout schedule, not grouped guide cells.
+    this.app.get('/api/now-playing/:slug', async function(req, res) {
+        res.set('Cache-Control', 'no-store')
+        const channel = channelPool.getChannelBySlug(req.params.slug)
+        if (!channel?.started || !channel.guideGenerator) return res.status(404).json({ error: 'Channel unavailable' })
+        const at = req.query.at === undefined ? Date.now() : Number(req.query.at)
+        if (!Number.isFinite(at) || Math.abs(at - Date.now()) > 120000) return res.status(400).json({ error: 'Invalid broadcast time' })
+        const entry = channel.guideGenerator.findEntryAtTime(at)
+        if (!entry) return res.status(404).json({ error: 'Program unavailable' })
+        try {
+            const subtitles = require('../Utilities/Subtitles.js')
+            const captions = await subtitles.getSubtitles(entry.filePath)
+            if (entry.endTime - at < 30000) {
+                const next = channel.guideGenerator.findEntryAtTime(entry.endTime + 1)
+                if (next) subtitles.getSubtitles(next.filePath).catch(() => {})
+            }
+            res.json({ id: `${entry.hash}:${entry.startTime}`, startTime: entry.startTime, endTime: entry.endTime,
+                captions: { status: captions.status, ...(captions.status === 'ready' ? { url: `/api/captions/${encodeURIComponent(channel.slug)}/${entry.hash}/${captions.key}.vtt` } : {}) } })
+        } catch { res.json({ id: `${entry.hash}:${entry.startTime}`, startTime: entry.startTime, endTime: entry.endTime, captions: { status: 'unavailable' } }) }
+    })
+
+    this.app.get('/api/captions/:slug/:hash/:key.vtt', async function(req, res) {
+        if (!/^[a-f0-9]{32}$/.test(req.params.hash) || !/^[a-f0-9]{64}$/.test(req.params.key)) return res.status(404).end()
+        if (!channelPool.getChannelBySlug(req.params.slug)) return res.status(404).end()
+        const video = Database().getVideoByHash(req.params.slug, req.params.hash)
+        if (!video || video.cache_quarantined) return res.status(404).end()
+        try {
+            const subtitles = require('../Utilities/Subtitles.js')
+            if (await subtitles.keyFor(video.file_path) !== req.params.key) return res.status(404).end()
+            res.set({ 'Content-Type': 'text/vtt; charset=utf-8', 'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff' })
+            res.sendFile(path.join(subtitles.directory(), `${req.params.key}.vtt`), error => { if (error && !res.headersSent) res.status(404).end() })
+        } catch { res.status(404).end() }
+    })
+
     // Single channel schedule
     this.app.get(`/:slug/schedule`, function(req, res) {
         const slug = req.params.slug

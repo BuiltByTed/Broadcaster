@@ -72,6 +72,29 @@ The guide displays short music and Beavis clips in roughly half-hour blocks, wit
 
 The encoder can repair severely stretched source video timestamps when an independent packet count at the declared frame rate agrees with the audio duration. It preserves the source file and records the repair in cache metadata. Short audio tracks are padded with silence so playback remains continuous through the end of the video.
 
+## TV controls and subtitles
+
+Channel up/down preloads the two adjacent channels at their current broadcast positions. This uses a bounded 32 MiB memory cache, pauses while the tab is hidden, and is disabled when the browser requests data saving. Turning the TV off clears it. Cached playlists expire after 2.5 seconds and their start position advances with broadcast time.
+
+The guide's **ASPECT → AUTO** setting follows decoded video dimensions. It identifies stable black side bars around a 4:3 picture and crops them in the player; widescreen letterboxing stays intact. Detection uses several frames and does not treat a dark scene as evidence to crop. Manual 4:3 and 16:9 frame settings remain available. CRT glass and the TV frame have square corners.
+
+**CC** toggles classic white monospace captions on black rectangles. Captions use the playing HLS program timestamp, remain synchronized through channel/program changes, and are independent of the grouped guide. English sidecar SRT/VTT/ASS files and embedded text subtitles are converted to WebVTT on demand and cached under `/data/subtitles`. Full English tracks are preferred; foreign and forced-only tracks are excluded. Image-only PGS/VobSub tracks require a text subtitle alternative.
+
+Plex's downloaded external text subtitles can also be used. Place a JSON array in `/data/plex-servers.json` (or set `PLEX_SERVERS_FILE`). Mount the corresponding Plex configuration **read-only** so Broadcaster can match the exact source file in Plex's library and read the existing authentication token. Example:
+
+```json
+[
+  {
+    "url": "http://plex:32400",
+    "preferencesPath": "/plex/Library/Application Support/Plex Media Server/Preferences.xml",
+    "databasePath": "/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
+    "pathMappings": [{ "from": "/tv", "to": "/media/TV" }]
+  }
+]
+```
+
+`from` is the path Plex sees; `to` is the same media directory inside Broadcaster. Multiple servers/mappings are supported. The Plex database is opened read-only, and tokens and library paths never reach the browser. Plex failures do not interrupt playback or local subtitle extraction. Missing subtitles are checked again after ten minutes; successful conversions are refreshed after a day. The CC button's tooltip reports when a program has no text captions.
+
 ## Monitoring
 
 - `/healthz`: startup state and deployed Git commit.

@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { startPlayback } from './playback.mjs'
 import StaticNoise from './StaticNoise.jsx'
+import { ChannelWarmup } from './channelWarmup.mjs'
+import { watchPicture } from './picture.mjs'
+import { parseCaptions, activeCaption } from './captions.mjs'
 import './App.css'
 import { cancelChannelSwitch, scheduleChannelSwitch } from './channelSwitch.mjs'
 import {
@@ -51,6 +54,15 @@ function App() {
   const videoRef = useRef(null)
   const playbackCleanupRef = useRef(null)
   const powerRef = useRef(false)
+  const warmupRef = useRef(null)
+  if (!warmupRef.current) warmupRef.current = new ChannelWarmup()
+  const broadcastTimeRef = useRef(null)
+  const pictureRef = useRef(null)
+  const [picture, setPicture] = useState({ aspect: '16:9', crop: 1 })
+  const [pictureSize, setPictureSize] = useState({ width: 0, height: 0 })
+  const [captionsOn, setCaptionsOn] = useState(() => { try { return localStorage.getItem('tv-captions') === 'on' } catch { return false } })
+  const [caption, setCaption] = useState('')
+  const [captionStatus, setCaptionStatus] = useState('')
   const serverOffsetRef = useRef(0)
   const channelSwitchTimeoutRef = useRef(null)
   const channelOverlayTimeoutRef = useRef(null)
@@ -79,7 +91,7 @@ function App() {
   const [showGuide, setShowGuide] = useState(false)
   const [guideData, setGuideData] = useState({})
   const [aspectRatio, setAspectRatio] = useState(() => {
-    try { return localStorage.getItem('tv-aspectRatio') || '16:9' } catch { return '16:9' }
+    try { return localStorage.getItem('tv-aspectMode') || 'auto' } catch { return 'auto' }
   })
   const [scanlines, setScanlines] = useState(() => {
     try { return localStorage.getItem('tv-scanlines') === 'on' } catch { return false }
@@ -127,10 +139,70 @@ function App() {
       cancelChannelEntry(channelEntryInvalidTimeoutRef)
       clearPlaybackTimeout()
       stopPlaybackSession()
+      warmupRef.current.clear()
       clearTimeout(channelOverlayTimeoutRef.current)
       clearTimeout(volumeOverlayTimeoutRef.current)
     }
   }, [])
+
+  const frameAspect = aspectRatio === 'auto' ? picture.aspect : aspectRatio
+
+  useEffect(() => watchPicture(videoRef.current, setPicture), [])
+  useEffect(() => {
+    const element = pictureRef.current.parentElement
+    const resize = () => {
+      const ratio = frameAspect === '4:3' ? 4 / 3 : 16 / 9
+      const width = Math.min(element.clientWidth, element.clientHeight * ratio)
+      setPictureSize({ width, height: width / ratio })
+    }
+    const observer = new ResizeObserver(resize)
+    observer.observe(element)
+    resize()
+    return () => observer.disconnect()
+  }, [frameAspect])
+
+  useEffect(() => {
+    if (!isPoweredOn || !channels.length) { warmupRef.current.clear(); return }
+    const indexes = currentChannelIndex < 0 ? [0, channels.length - 1] :
+      [(currentChannelIndex + 1) % channels.length, (currentChannelIndex + channels.length - 1) % channels.length]
+    return warmupRef.current.follow(indexes.filter(i => i !== currentChannelIndex).map(i => `/${encodeURIComponent(channels[i].slug)}.m3u8`))
+  }, [isPoweredOn, currentChannelIndex, channels])
+
+  useEffect(() => {
+    try { localStorage.setItem('tv-captions', captionsOn ? 'on' : 'off') } catch {}
+    setCaption('')
+    setCaptionStatus('')
+    if (!captionsOn || !isPoweredOn || currentChannelIndex < 0) return
+    const controller = new AbortController()
+    let program = null, cues = [], nextCheck = 0, busy = false
+    const tick = async () => {
+      const clock = broadcastTimeRef.current
+      if (!clock || document.hidden || controller.signal.aborted) return
+      const time = clock.time + (videoRef.current.paused ? 0 : Math.max(0, videoRef.current.currentTime - clock.mediaTime) * 1000)
+      setCaption(program && time >= program.startTime && time < program.endTime ? activeCaption(cues, (time - program.startTime) / 1000) : '')
+      if (program && time >= program.endTime) { program = null; cues = []; nextCheck = 0 }
+      if (busy || Date.now() < nextCheck) return
+      busy = true
+      try {
+        const slug = encodeURIComponent(channels[currentChannelIndex].slug)
+        const res = await fetch(`/api/now-playing/${slug}?at=${Math.round(time)}`, { signal: controller.signal })
+        if (!res.ok) throw new Error('Captions unavailable')
+        const next = await res.json()
+        if (controller.signal.aborted) return
+        if (next.id !== program?.id) { cues = []; setCaption(''); program = next }
+        if (!cues.length && next.captions?.url) {
+          const sub = await fetch(next.captions.url, { signal: controller.signal })
+          if (!sub.ok) throw new Error('Captions unavailable')
+          cues = parseCaptions(await sub.text())
+        }
+        if (!controller.signal.aborted) setCaptionStatus(cues.length ? '' : next.captions?.status === 'preparing' ? 'Loading captions' : 'No captions for this program')
+        nextCheck = Date.now() + (next.captions?.status === 'preparing' ? 2000 : 5000)
+      } catch (error) { if (error.name !== 'AbortError') { setCaptionStatus('Captions unavailable'); nextCheck = Date.now() + 10000 } }
+      finally { busy = false }
+    }
+    const timer = setInterval(tick, 100)
+    return () => { controller.abort(); clearInterval(timer) }
+  }, [captionsOn, isPoweredOn, currentChannelIndex, channels])
 
   // Calculate TV size based on window and aspect ratio
   useEffect(() => {
@@ -142,7 +214,7 @@ function App() {
       const availableWidth = Math.max(160, window.innerWidth - padding - borderWidth)
       const availableHeight = Math.max(120, window.innerHeight - padding - controlsHeight - borderWidth)
 
-      const ratio = aspectRatio === '4:3' ? 4 / 3 : 16 / 9
+      const ratio = frameAspect === '4:3' ? 4 / 3 : 16 / 9
 
       // Calculate dimensions that fit within available space
       let width = availableWidth
@@ -166,15 +238,10 @@ function App() {
     calculateSize()
     window.addEventListener('resize', calculateSize)
     return () => window.removeEventListener('resize', calculateSize)
-  }, [aspectRatio])
+  }, [frameAspect])
 
-  // Persist settings to localStorage and reload static if playing
   useEffect(() => {
-    try { localStorage.setItem('tv-aspectRatio', aspectRatio) } catch {}
-    // Reload static channel if currently showing static (channel index -1)
-    if (isPoweredOn && currentChannelIndex === -1) {
-      playStaticChannel()
-    }
+    try { localStorage.setItem('tv-aspectMode', aspectRatio) } catch {}
   }, [aspectRatio])
 
   useEffect(() => {
@@ -193,7 +260,8 @@ function App() {
         if (Array.isArray(data.channels)) setChannels(previous => {
           // Existing channel numbers stay stable as more channels finish encoding.
           const known = new Set(previous.map(channel => channel.slug))
-          return [...previous, ...data.channels.filter(channel => !known.has(channel.slug))]
+          const additions = data.channels.filter(channel => !known.has(channel.slug))
+          return additions.length ? [...previous, ...additions] : previous
         })
       } catch (error) { if (error.name !== 'AbortError') console.warn(error.message) }
       if (!controller.signal.aborted) timer = setTimeout(refresh, 15000)
@@ -231,7 +299,9 @@ function App() {
     showOverlay(setShowChannelOverlay, channelOverlayTimeoutRef)
 
     setAutoplayBlocked(false)
-    setPlaybackStatus('Tuning…')
+    setPlaybackStatus('')
+    broadcastTimeRef.current = null
+    setCaption('')
     // Brief coalescing only; no artificial half-second pause on every tune.
     scheduleChannelSwitch(channelSwitchTimeoutRef, () => {
       const video = videoRef.current
@@ -239,11 +309,13 @@ function App() {
       video.volume = currentVolume
       playbackCleanupRef.current = startPlayback({
         video, url: `/${encodeURIComponent(channel.slug)}.m3u8`,
+        cache: warmupRef.current,
+        onClock: time => { broadcastTimeRef.current = { time, mediaTime: video.currentTime } },
         onPlaying: () => setShowStatic(false),
         onStatus: setPlaybackStatus,
         onBlocked: setAutoplayBlocked
       })
-    }, 60)
+    }, 0)
   }
 
   // Channel navigation
@@ -337,7 +409,7 @@ function App() {
     clearPlaybackTimeout()
     stopPlaybackSession()
     setShowStatic(true)
-    setPlaybackStatus(channels.length ? 'Select a channel' : 'Preparing channels…')
+    setPlaybackStatus('')
   }
 
   // Power toggle
@@ -580,14 +652,17 @@ function App() {
           onAnimationEnd={() => setPowerAnimation(null)}
           style={{ width: tvSize.width, height: tvSize.height }}
         >
+          <div className="picture-window" ref={pictureRef} style={pictureSize}>
           <video
             ref={videoRef}
             playsInline
             webkit-playsinline="true"
             onClick={() => { videoRef.current.muted = false; videoRef.current.play().catch(() => {}) }}
             className={currentChannelIndex === -1 ? 'static-video' : ''}
-            style={{ visibility: isPoweredOn ? 'visible' : 'hidden' }}
+            style={{ visibility: isPoweredOn ? 'visible' : 'hidden', transform: `scale(${aspectRatio === 'auto' ? picture.crop : 1})` }}
           />
+          {captionsOn && isPoweredOn && !showStatic && caption && <div className="closed-captions" aria-live="off">{caption.split('\n').map((line, i) => <div key={i}><span>{line}</span></div>)}</div>}
+          </div>
           <StaticNoise active={showStatic && isPoweredOn} />
           {isPoweredOn && playbackStatus && <div className="playback-status" role="status">{playbackStatus}</div>}
           {isPoweredOn && autoplayBlocked && <button className="playback-resume" onClick={() => videoRef.current.play().catch(() => {})}>Click to play</button>}
@@ -620,6 +695,7 @@ function App() {
                   <div className="guide-setting">
                     <span>ASPECT</span>
                     <div className="guide-toggle">
+                      <button className={aspectRatio === 'auto' ? 'active' : ''} onClick={() => setAspectRatio('auto')}>AUTO</button>
                       <button
                         className={aspectRatio === '16:9' ? 'active' : ''}
                         onClick={() => setAspectRatio('16:9')}
@@ -763,6 +839,7 @@ function App() {
             <path d="M23 11h-2V9h-2v2h-2v2h2v2h2v-2h2z" fill="currentColor"/>
           </svg>
         </button>
+        <button className={`cc-button ${captionsOn ? 'active' : ''}`} onClick={() => setCaptionsOn(value => !value)} title={captionsOn && captionStatus ? `Closed captions: ${captionStatus}` : 'Closed captions'} aria-label="Closed captions" aria-pressed={captionsOn}>CC</button>
         <button onClick={toggleFullscreen} title="Fullscreen">
           <svg viewBox="0 0 24 24" width="24" height="24">
             <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/>

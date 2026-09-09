@@ -1,8 +1,9 @@
 import Hls from 'hls.js'
+import { warmLoader } from './channelWarmup.mjs'
 
 // One owner for all player listeners, retries and media resources. A disposed
 // session cannot restart a channel the viewer has already left.
-export function startPlayback({ video, url, onPlaying, onStatus, onBlocked }) {
+export function startPlayback({ video, url, cache, onClock, onPlaying, onStatus, onBlocked }) {
   let disposed = false
   let hls = null
   let retryTimer = null
@@ -13,7 +14,14 @@ export function startPlayback({ video, url, onPlaying, onStatus, onBlocked }) {
   const play = () => video.play().catch(error => {
     if (!disposed && error.name === 'NotAllowedError') onBlocked(true)
   })
-  const progress = () => { lastProgress = Date.now() }
+  const progress = () => {
+    lastProgress = Date.now()
+    let date = hls?.playingDate
+    try {
+      if (!date && typeof video.getStartDate === 'function') date = new Date(video.getStartDate().getTime() + video.currentTime * 1000)
+    } catch { /* A native player may not have a timeline until metadata loads. */ }
+    if (date && Number.isFinite(date.getTime())) onClock?.(date.getTime())
+  }
   const playing = () => {
     progress()
     attempts = 0
@@ -37,6 +45,7 @@ export function startPlayback({ video, url, onPlaying, onStatus, onBlocked }) {
     video.loop = false
     if (Hls.isSupported()) {
       hls = new Hls({
+        ...(cache ? { loader: warmLoader(Hls.DefaultConfig.loader, cache) } : {}),
         enableWorker: true,
         lowLatencyMode: false,
         maxBufferLength: 30,
