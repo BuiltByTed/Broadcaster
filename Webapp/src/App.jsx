@@ -58,6 +58,7 @@ function App() {
   if (!warmupRef.current) warmupRef.current = new ChannelWarmup()
   const broadcastTimeRef = useRef(null)
   const pictureRef = useRef(null)
+  const pictureWatcherRef = useRef(null)
   const [picture, setPicture] = useState({ aspect: '16:9', crop: 1 })
   const [pictureSize, setPictureSize] = useState({ width: 0, height: 0 })
   const [captionsOn, setCaptionsOn] = useState(() => { try { return localStorage.getItem('tv-captions') === 'on' } catch { return false } })
@@ -147,7 +148,10 @@ function App() {
 
   const frameAspect = aspectRatio === 'auto' ? picture.aspect : aspectRatio
 
-  useEffect(() => watchPicture(videoRef.current, setPicture), [])
+  useEffect(() => {
+    pictureWatcherRef.current = watchPicture(videoRef.current, setPicture)
+    return () => pictureWatcherRef.current?.()
+  }, [])
   useEffect(() => {
     const element = pictureRef.current.parentElement
     const resize = () => {
@@ -310,6 +314,7 @@ function App() {
       playbackCleanupRef.current = startPlayback({
         video, url: `/${encodeURIComponent(channel.slug)}.m3u8`,
         cache: warmupRef.current,
+        onProgram: program => pictureWatcherRef.current?.setProgram(program),
         onClock: time => { broadcastTimeRef.current = { time, mediaTime: video.currentTime } },
         onPlaying: () => setShowStatic(false),
         onStatus: setPlaybackStatus,

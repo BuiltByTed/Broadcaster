@@ -544,7 +544,7 @@ test('generateVideo skips unreadable media without spawning ffmpeg', async t => 
 
     // Permanent unreadable marker so later queueChannel cycles skip this source
     assert.equal(preGenerator.isMarkedUnreadable(filePath, channel.slug), true)
-    const marker = JSON.parse(fs.readFileSync(path.join(path.dirname(preGenerator.unreadableMarkerPath(filePath, channel.slug)), 'v2', 'unreadable.json'), 'utf8'))
+    const marker = JSON.parse(fs.readFileSync(path.join(path.dirname(preGenerator.unreadableMarkerPath(filePath, channel.slug)), `v${preGenerator.HLS_CACHE_VERSION}`, 'unreadable.json'), 'utf8'))
     assert.equal(marker.reason, 'ffprobe_failed')
 })
 
@@ -680,6 +680,7 @@ test('generateVideo marks invalid-input ffmpeg exit as unreadable and resolves',
     const preGenerator = require(preGeneratorPath)
     const channel = { slug: 'news', name: 'News' }
     preGenerator.probeVideo = async () => ({ codec: 'h264', width: 640, height: 480, pixFmt: 'yuv420p', audioCodec: 'aac' })
+    preGenerator.getPresentation = async () => ({ crop: null })
     const result = await preGenerator.generateVideo(41, filePath, channel)
 
     assert.deepEqual(result, { skipped: true, reason: 'unreadable' })

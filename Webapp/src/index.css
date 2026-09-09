@@ -1,3 +1,14 @@
+@font-face {
+  font-family: 'Modern DOS';
+  src: url('./fonts/ModernDOS8x16.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root { --tv-font: 'Modern DOS', monospace; font-synthesis: none; }
+button { font-family: var(--tv-font); }
+
 * {
   margin: 0;
   padding: 0;
@@ -5,7 +16,7 @@
 }
 
 body {
-  font-family: 'Courier New', monospace;
+  font-family: var(--tv-font);
   background: #000;
   color: #0f0;
   overflow: hidden;

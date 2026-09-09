@@ -253,6 +253,16 @@ class TelevisionUI {
         res.json(guide)
     })
 
+    this.app.get('/api/picture/:slug/:hash', async function(req, res) {
+        if (!/^[a-f0-9]{32}$/.test(req.params.hash) || !channelPool.getChannelBySlug(req.params.slug)) return res.status(404).end()
+        const video = Database().getVideoByHash(req.params.slug, req.params.hash)
+        if (!video || video.cache_quarantined) return res.status(404).end()
+        try {
+            const profile = await require('../Utilities/MediaPresentation.js').getPresentation(video.file_path)
+            res.set('Cache-Control', 'private, max-age=3600').json({ aspect: profile.aspect, crop: Boolean(profile.crop) })
+        } catch { res.set('Retry-After', '5').status(503).json({ error: 'Picture profile unavailable' }) }
+    })
+
     // Caption identity follows the raw playout schedule, not grouped guide cells.
     this.app.get('/api/now-playing/:slug', async function(req, res) {
         res.set('Cache-Control', 'no-store')

@@ -24,9 +24,9 @@ async function main() {
     fs.writeFileSync(captionFile, '1\n00:00:00,000 --> 00:00:08,000\nCLASSIC TV CAPTIONS\nSecond line\n')
     for (let i = 0; i < 2; i++) {
       // The second clip has no source audio, exercising generated silent AAC.
-      execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=${i ? 'blue' : 'red'}:s=320x180:r=25`,
+      execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=${i ? 'blue' : 'red'}:s=${i ? '320x180' : '240x180'}:r=25`,
         ...(i ? ['-i', captionFile] : ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000']),
-        '-t', '8', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-c:s', 'mov_text', path.join(root, `clip${i}.mp4`)])
+        '-t', '8', '-vf', 'pad=320:180:(ow-iw)/2:0', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-c:s', 'mov_text', path.join(root, `clip${i}.mp4`)])
     }
     // Check real external and embedded subtitle conversion without transcoding video.
     const { extract } = require('../Utilities/Subtitles.js')
@@ -41,6 +41,13 @@ async function main() {
       pool.addChannel(channel)
       for (const row of Database().getChannelVideos(slug)) await encoder.generateVideo(row.id, row.file_path, channel)
       const videos = Database().getChannelVideos(slug, true)
+      const red = videos.find(video => video.file_path.endsWith('clip0.mp4'))
+      const redDir = path.join(scratch, 'channels', slug, 'videos', red.hash, `v${encoder.HLS_CACHE_VERSION}`)
+      const redMetadata = JSON.parse(fs.readFileSync(path.join(redDir, 'metadata.json'), 'utf8'))
+      assert.equal(redMetadata.presentation.crop.width, 240)
+      const redProbe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', path.join(redDir, 'stream.ts')], { encoding: 'utf8' }))
+      assert.equal(redProbe.streams[0].width, 320)
+      assert.equal(redProbe.streams[0].height, 240)
       assert.equal(videos.length, 3)
       for (const video of videos) assert.ok(Math.abs(video.duration_seconds - 8) < 0.2, `Unexpected repaired duration: ${video.duration_seconds}`)
       const now = Date.now()
@@ -50,7 +57,7 @@ async function main() {
         const startTime = time
         time += video.duration_seconds * 1000
         return { hash: video.hash, filePath: video.file_path, title: 'Music Videos', startTime, endTime: time,
-          duration: video.duration_seconds, segmentCount: video.segment_count, cacheVersion: 2 }
+          duration: video.duration_seconds, segmentCount: video.segment_count, cacheVersion: encoder.HLS_CACHE_VERSION }
       })
       channel.guideGenerator.saveGuide({ version: 3, channelSlug: slug, dayStart: getPrevious3am(), dayEnd: getNext3am(),
         schedule, shuffleState: { videoCount: 3, remaining: [] } })
@@ -76,6 +83,18 @@ async function main() {
     page.on('pageerror', error => errors.push(error.message))
     await page.goto('http://127.0.0.1:12129')
     await page.getByTitle('Power', { exact: true }).click()
+    await page.getByTitle('TV Guide', { exact: true }).click()
+    for (const aspect of ['4:3', '16:9']) {
+      await page.getByRole('button', { name: aspect, exact: true }).click()
+      await page.waitForFunction(() => {
+        const noise = document.querySelector('.static-noise')
+        return !noise.hidden && Math.abs(noise.width / noise.height - noise.clientWidth / noise.clientHeight) < 0.02
+      })
+    }
+    await page.getByRole('button', { name: 'AUTO', exact: true }).click()
+    await page.getByLabel('Close TV guide').click()
+    await page.evaluate(() => document.fonts.ready)
+    assert.equal(await page.evaluate(() => document.fonts.check('32px "Modern DOS"')), true)
     const started = Date.now()
     await page.getByTitle('Channel Up', { exact: true }).click()
     await page.waitForFunction(() => { const v = document.querySelector('video'); return !document.querySelector('.playback-status') && !v.paused && v.readyState >= 3 && v.currentTime > 0 })

@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 const Log = require('./Log.js')
 const tag = 'Database'
+const HLS_CACHE_VERSION = require('./HlsCacheVersion.js')
 
 const { CACHE_DIR } = process.env
 
@@ -231,7 +232,7 @@ class DatabaseManager {
                 COUNT(*) as total,
                 COALESCE(SUM(CASE WHEN transcoded = 1 AND cache_quarantined = 0 THEN 1 ELSE 0 END), 0) as transcoded,
                 MAX(CASE WHEN transcoded = 1 AND cache_quarantined = 0 THEN max_segment_duration ELSE 0 END) as maxSegmentDuration,
-                COALESCE(SUM(CASE WHEN cache_version >= 2 AND transcoded = 1 AND cache_quarantined = 0 THEN 1 ELSE 0 END), 0) as rebuilt
+                COALESCE(SUM(CASE WHEN cache_version >= ${HLS_CACHE_VERSION} AND transcoded = 1 AND cache_quarantined = 0 THEN 1 ELSE 0 END), 0) as rebuilt
             FROM videos v
             JOIN channels c ON v.channel_id = c.id
             WHERE c.slug = ?

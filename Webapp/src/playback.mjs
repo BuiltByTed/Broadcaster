@@ -3,7 +3,7 @@ import { warmLoader } from './channelWarmup.mjs'
 
 // One owner for all player listeners, retries and media resources. A disposed
 // session cannot restart a channel the viewer has already left.
-export function startPlayback({ video, url, cache, onClock, onPlaying, onStatus, onBlocked }) {
+export function startPlayback({ video, url, cache, onClock, onProgram, onPlaying, onStatus, onBlocked }) {
   let disposed = false
   let hls = null
   let retryTimer = null
@@ -67,6 +67,10 @@ export function startPlayback({ video, url, cache, onClock, onPlaying, onStatus,
           const start = offset < 0 ? details.totalduration + offset : offset
           player.targetLatency = Math.max(1, details.totalduration - start)
         }
+      })
+      player.on(Hls.Events.FRAG_CHANGED, (_, { frag }) => {
+        const match = new URL(frag.url).pathname.match(/\/channels\/([^/]+)\/videos\/([a-f0-9]{32})(?:\/v(\d+))?\//)
+        if (match && !disposed) onProgram?.({ slug: match[1], hash: match[2], cacheVersion: Number(match[3] || 0) })
       })
       player.on(Hls.Events.MANIFEST_PARSED, () => { if (!disposed && hls === player) play() })
       player.on(Hls.Events.ERROR, (_, data) => {

@@ -6,8 +6,9 @@ const Log = require('./Log.js')
 const Database = require('./Database.js')
 const { parseHlsPlaylist } = require('./HlsPlaylist.js')
 const tag = 'PreGenerator'
-const { timingCandidate, confirmTimingRepair } = require('./MediaTiming.js')
-const HLS_CACHE_VERSION = 2
+const { timingCandidate, confirmTimingRepair, streamDuration } = require('./MediaTiming.js')
+const { getPresentation } = require('./MediaPresentation.js')
+const HLS_CACHE_VERSION = require('./HlsCacheVersion.js')
 
 const { CACHE_DIR,
         VIDEO_CODEC,
@@ -118,10 +119,13 @@ function resolveEncodeSettings({
     videoCodecConfig = VIDEO_CODEC,
     videoPreset = VIDEO_PRESET,
     videoCrf = VIDEO_CRF,
-    videoFilter = VIDEO_FILTER
+    videoFilter = VIDEO_FILTER,
+    crop = null
 }) {
     const crf = videoCrf || '23'
     const deinterlaceCpu = deinterlacePrefix(videoFilter, false)
+    const cropCpu = crop ? `crop=${crop.width}:${crop.height}:${crop.x}:0,` : ''
+    const outputHeight = crop ? Math.round(Number(width) * 0.75 / 2) * 2 : -2
 
     if (canUseGPU) {
         // Full GPU path: NVDEC decode + CUDA filters + NVENC encode
@@ -131,7 +135,7 @@ function resolveEncodeSettings({
             videoCodec: 'h264_nvenc',
             videoPreset: videoPreset || 'p4',
             qualityArgs: ['-cq', crf, '-rc', 'vbr', '-b:v', '0'],
-            fullVideoFilter: `${deinterlace}scale_cuda=${width}:-2,hwdownload,format=nv12`
+            fullVideoFilter: `${deinterlace}scale_cuda=${crop ? Math.ceil(Number(width) * crop.sourceWidth / crop.width / 2) * 2 : width}:${outputHeight},hwdownload,format=nv12${crop ? `,crop=${width}:ih:(iw-ow)/2:0,setsar=1` : ''}`
         }
     }
 
@@ -143,7 +147,7 @@ function resolveEncodeSettings({
             videoCodec: 'h264_nvenc',
             videoPreset: videoPreset || 'p4',
             qualityArgs: ['-cq', crf, '-rc', 'vbr', '-b:v', '0'],
-            fullVideoFilter: `${deinterlaceCpu}scale=${width}:-2`
+            fullVideoFilter: `${deinterlaceCpu}${cropCpu}scale=${width}:${outputHeight}${crop ? ',setsar=1' : ''}`
         }
     }
 
@@ -165,7 +169,7 @@ function resolveEncodeSettings({
         videoCodec,
         videoPreset: resolvedPreset,
         qualityArgs: ['-crf', crf],
-        fullVideoFilter: `${deinterlaceCpu}scale=${width}:-2`
+        fullVideoFilter: `${deinterlaceCpu}${cropCpu}scale=${width}:${outputHeight}${crop ? ',setsar=1' : ''}`
     }
 }
 
@@ -735,7 +739,8 @@ class PreGenerator {
 
     async probeVideo(filePath) {
         try {
-            const streams = (await this.probeJson(filePath)).streams || []
+            const probe = await this.probeJson(filePath, ['-show_format'])
+            const streams = probe.streams || []
             const video = streams.find(stream => stream.codec_type === 'video' && !stream.disposition?.attached_pic)
             if (!video) return { codec: 'unreadable', probeFailed: true }
             const audio = streams.find(stream => stream.codec_type === 'audio')
@@ -746,7 +751,8 @@ class PreGenerator {
                 timingRepair = confirmTimingRepair(candidate, counted.streams?.[0]?.nb_read_packets)
             }
             return { codec: video.codec_name, width: video.width, height: video.height,
-                streamIndex: video.index, audioIndex: audio?.index, timingRepair,
+                streamIndex: video.index, sample_aspect_ratio: video.sample_aspect_ratio,
+                duration: streamDuration(video) || Number(probe.format?.duration), audioIndex: audio?.index, timingRepair,
                 pixFmt: video.pix_fmt, bitDepth: video.bits_per_raw_sample || '8', audioCodec: audio?.codec_name || 'none' }
         } catch (error) {
             return { codec: 'unreadable', probeFailed: true, probeError: this.describeProbeFailure(error) }
@@ -756,8 +762,12 @@ class PreGenerator {
     /**
      * Generate HLS files for a single video
      */
+    async getPresentation(filePath, videoInfo) { return getPresentation(filePath, videoInfo) }
+
     async generateVideo(videoId, filePath, channel, options = {}) {
         const videoInfo = await this.probeVideo(filePath)
+        if (this.shuttingDown) throw new Error('Generation is stopping')
+        const presentation = isUnreadableProbeResult(videoInfo) ? null : await this.getPresentation(filePath, videoInfo)
         if (this.shuttingDown) throw new Error('Generation is stopping')
         return new Promise((resolve, reject) => {
             const videoHash = this.getVideoHash(filePath)
@@ -825,8 +835,11 @@ class PreGenerator {
                 is10Bit,
                 width,
                 filePath,
-                channel
+                channel,
+                crop: presentation?.crop
             })
+
+            if (presentation?.crop) Log(tag, `Cropping pillarboxed picture to ${presentation.crop.width}x${presentation.crop.height}`, channel)
 
             // Fixed AAC stereo format prevents decoder changes between programs.
             const audioArgs = ['-c:a', 'aac', '-b:a', AUDIO_BITRATE || '192k', '-ac', '2', '-ar', '48000']
@@ -905,6 +918,7 @@ class PreGenerator {
                         duration: videoDuration,
                         encodingSeconds: duration,
                         timingRepair: videoInfo.timingRepair || null,
+                        presentation,
                         maxSegmentDuration: parsed.maxDuration,
                         cacheVersion: HLS_CACHE_VERSION,
                         segmentCount: segmentCount
@@ -1109,3 +1123,5 @@ module.exports.deinterlacePrefix = deinterlacePrefix
 module.exports.isUnreadableProbeResult = isUnreadableProbeResult
 module.exports.isUnreadableMediaStderr = isUnreadableMediaStderr
 
+
+module.exports.HLS_CACHE_VERSION = HLS_CACHE_VERSION

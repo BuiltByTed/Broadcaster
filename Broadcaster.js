@@ -22,6 +22,7 @@ const cleanup = () => {
   Log(tag, 'Cleaning up ...')
   try {
     PreGenerator.stopActiveWorkers()
+    require('./Utilities/MediaPresentation.js').stop()
   } catch (e) {
     Log(tag, `Error stopping ffmpeg workers: ${e.message}`, undefined, { error: e, phase: 'cleanup' })
   }
