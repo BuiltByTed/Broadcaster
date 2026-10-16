@@ -743,16 +743,10 @@ test('generateVideo falls back to uncropped encoding when presentation analysis 
     const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-crop-fallback-'))
     t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))
 
-    const filePath = '/library/fallback.mkv'
-    const logs = []
-    const db = createDatabase(filePath, [])
-    db.markVideoTranscoded = () => {}
-    db.updateSegmentMetadata = () => {}
-    const encoder = loadPreGenerator(cacheDir, db, { logs })
-    const channel = { slug: 'news', name: 'News' }
-
+    let spawnCalls = 0
     t.mock.method(childProcess, 'execFileSync', () => { throw new Error('no gpu') })
     t.mock.method(childProcess, 'spawn', (_cmd, args) => {
+        spawnCalls++
         const outIndex = args.at(-1)
         const outDir = path.dirname(outIndex)
         fs.mkdirSync(outDir, { recursive: true })
@@ -766,9 +760,18 @@ test('generateVideo falls back to uncropped encoding when presentation analysis 
         return proc
     })
 
+    const filePath = '/library/fallback.mkv'
+    const logs = []
+    const db = createDatabase(filePath, [])
+    db.markVideoTranscoded = () => {}
+    db.updateSegmentMetadata = () => {}
+    const encoder = loadPreGenerator(cacheDir, db, { logs })
+    const channel = { slug: 'news', name: 'News' }
+
     encoder.probeVideo = async () => ({ codec: 'h264', width: 640, height: 480, pixFmt: 'yuv420p', audioCodec: 'aac' })
     encoder.getPresentation = async () => { throw new Error('Presentation analysis unavailable') }
 
     await encoder.generateVideo(41, filePath, channel)
+    assert.equal(spawnCalls, 1)
     assert.equal(logs.some(l => /Proceeding without crop analysis/.test(l.message)), true)
 })
