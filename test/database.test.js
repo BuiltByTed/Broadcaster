@@ -8,7 +8,8 @@ const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-database-'))
 process.env.CACHE_DIR = cacheDir
 
 const Database = require('../Utilities/Database.js')
-const { migrateExistingVideos } = require('../Utilities/MigrateDatabase.js')
+const { migrateExistingVideos, backfillDurations } = require('../Utilities/MigrateDatabase.js')
+const HLS_CACHE_VERSION = require('../Utilities/HlsCacheVersion.js')
 const db = Database()
 
 test.after(() => {
@@ -82,4 +83,53 @@ test('migration marks only the channel-specific video row', () => {
     assert.equal(firstVideo.duration_seconds, 10)
     assert.equal(firstVideo.segment_count, 2)
     assert.equal(secondVideo.transcoded, 0)
+})
+
+test('migration and backfill support versioned v3 cache directories', () => {
+    const v3Path = '/media/v3-only.mp4'
+    const v3Hash = 'v3-only-hash'
+    const channelId = db.upsertChannel('v3-channel', 'V3 Channel', 'shuffle')
+    db.insertVideo(channelId, v3Path, v3Hash, 'V3 Only')
+
+    const v3Dir = path.join(
+        cacheDir,
+        'channels',
+        'v3-channel',
+        'videos',
+        v3Hash,
+        `v${HLS_CACHE_VERSION}`
+    )
+    fs.mkdirSync(v3Dir, { recursive: true })
+    fs.writeFileSync(
+        path.join(v3Dir, 'index.m3u8'),
+        '#EXTM3U\n#EXTINF:1.0,\n#EXT-X-BYTERANGE:100@0\nstream.ts\n#EXTINF:1.5,\n#EXT-X-BYTERANGE:150@100\nstream.ts\n#EXT-X-ENDLIST\n'
+    )
+    fs.writeFileSync(
+        path.join(v3Dir, 'metadata.json'),
+        JSON.stringify({ cacheVersion: HLS_CACHE_VERSION })
+    )
+
+    assert.equal(migrateExistingVideos('v3-channel'), 1)
+
+    const migrated = db.getVideoByPath('v3-channel', v3Path)
+    assert.equal(migrated.transcoded, 1)
+    assert.equal(migrated.cache_version, HLS_CACHE_VERSION)
+    assert.equal(migrated.duration_seconds, 2.5)
+    assert.equal(migrated.segment_count, 2)
+    assert.equal(migrated.max_segment_duration, 1.5)
+
+    // Clear duration to verify backfillDurations finds v3 playlist
+    db.db.prepare('UPDATE videos SET duration_seconds = NULL, segment_count = NULL WHERE id = ?').run(migrated.id)
+    assert.equal(backfillDurations(), 1)
+    const backfilled = db.getVideoByPath('v3-channel', v3Path)
+    assert.equal(backfilled.duration_seconds, 2.5)
+    assert.equal(backfilled.segment_count, 2)
+})
+
+test('closing the database resets singleton so subsequent Database() calls reopen cleanly', () => {
+    db.close()
+    const reopened = Database()
+    assert.ok(reopened.db)
+    assert.ok(Array.isArray(reopened.getAllChannels()))
+    Database.closeIfOpen()
 })

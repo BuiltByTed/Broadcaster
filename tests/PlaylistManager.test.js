@@ -129,3 +129,34 @@ test('keeps the forward segment window full across a video boundary', () => {
         Date.now = originalNow
     }
 })
+
+test('raises targetDuration when a segment exceeds an initial empty-guide targetDuration', () => {
+    writeVideoPlaylist('test-channel', 'video-long', [1.0, 3.8, 1.0])
+    const now = 3_000_000
+    const entry = {
+        hash: 'video-long',
+        startTime: now - 1_000,
+        endTime: now + 4_800
+    }
+    const manager = new PlaylistManager({
+        slug: 'test-channel',
+        paths: ['/media/tv']
+    })
+    manager.targetDuration = 2
+    manager.getVideoByHash = () => ({ duration_seconds: 5.8, segment_count: 3 })
+    manager.setGuideGenerator({
+        findEntryAtTime: () => entry,
+        getActiveGuide: () => ({ schedule: [entry] })
+    })
+
+    const originalNow = Date.now
+    Date.now = () => now
+    try {
+        const playlist = manager.createRollingPlaylist()
+        assert.match(playlist, /#EXT-X-TARGETDURATION:4\n/)
+        assert.equal(manager.targetDuration, 4)
+        assert.equal(manager.getVideoDisplayName('/media/tv/Show Name/Season 1/Ep1.mkv'), 'Show Name')
+    } finally {
+        Date.now = originalNow
+    }
+})

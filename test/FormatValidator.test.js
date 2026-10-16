@@ -38,3 +38,17 @@ test('matches formats case-insensitively when config is mixed case', () => {
     process.env.SUPPORTED_FORMATS = prev
   }
 })
+
+test('rejects extensionless files, dotfiles, and works when SUPPORTED_FORMATS is unset', () => {
+  const prev = process.env.SUPPORTED_FORMATS
+  try {
+    assert.equal(Format.isSupported('mp4'), false)
+    assert.equal(Format.isSupported('.mp4'), false)
+    assert.equal(Format.isSupported('/media/show.mp4/README'), false)
+    delete process.env.SUPPORTED_FORMATS
+    assert.equal(Format.isSupported('/media/movie.mp4'), true)
+    assert.equal(Format.isSupported('/media/notes.txt'), false)
+  } finally {
+    process.env.SUPPORTED_FORMATS = prev
+  }
+})

@@ -29,6 +29,7 @@ function allowHlsStaticPath(req, res, next) {
 }
 
 function setHlsStaticHeaders(res, filePath) {
+    res.set('X-Content-Type-Options', 'nosniff')
     if (filePath.endsWith('.ts')) {
         res.set('Content-Type', 'video/mp2t')
         res.set('Cache-Control', 'public, max-age=3600')

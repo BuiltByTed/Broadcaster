@@ -93,7 +93,7 @@ class GuideGenerator {
       Number.isFinite(video.duration_seconds) && video.duration_seconds > 0
     )
     const currentHashes = new Set(videos.map(video =>
-      crypto.createHash('md5').update(video.file_path).digest('hex')
+      video.hash || crypto.createHash('md5').update(video.file_path).digest('hex')
     ))
 
     const missingEntry = guide.schedule.find(entry => !currentHashes.has(entry.hash))
@@ -221,7 +221,7 @@ class GuideGenerator {
       : [...videos].sort((a, b) =>
         a.file_path.localeCompare(b.file_path, undefined, { sensitivity: 'base' })
       )
-    const byHash = new Map(libraryVideos.map(video => [crypto.createHash('md5').update(video.file_path).digest('hex'), video]))
+    const byHash = new Map(libraryVideos.map(video => [video.hash || crypto.createHash('md5').update(video.file_path).digest('hex'), video]))
     const remaining = (prevGuide?.shuffleState?.remaining || []).map(hash => byHash.get(hash)).filter(Boolean)
     let scheduledVideos = remaining.length ? remaining : (shouldShuffle ? shuffleArray(libraryVideos) : libraryVideos)
     let videoIndex = 0
@@ -240,7 +240,7 @@ class GuideGenerator {
       const video = scheduledVideos[videoIndex]
       const duration = video.duration_seconds
 
-      const hash = crypto.createHash('md5').update(video.file_path).digest('hex')
+      const hash = video.hash || crypto.createHash('md5').update(video.file_path).digest('hex')
 
       schedule.push({
         hash: hash,
@@ -259,7 +259,7 @@ class GuideGenerator {
 
     // Store remaining shuffle state for next day's continuity
     const remainingHashes = scheduledVideos.slice(videoIndex).map(v =>
-      crypto.createHash('md5').update(v.file_path).digest('hex')
+      v.hash || crypto.createHash('md5').update(v.file_path).digest('hex')
     )
 
     const guide = {
@@ -357,7 +357,7 @@ class GuideGenerator {
 
     return guide.schedule.map(entry => ({
       hash: entry.hash,
-      ...describeVideo(entry.filePath || entry.title, this.channel.paths),
+      ...(entry.filePath ? describeVideo(entry.filePath, this.channel.paths) : { title: entry.title || '', episodeTitle: entry.title || '' }),
       startTime: entry.startTime,
       endTime: entry.endTime,
       duration: entry.duration,

@@ -178,13 +178,13 @@ function App() {
     setCaptionStatus('')
     if (!captionsOn || !isPoweredOn || currentChannelIndex < 0) return
     const controller = new AbortController()
-    let program = null, cues = [], nextCheck = 0, busy = false
+    let program = null, cues = [], loadedUrl = null, nextCheck = 0, busy = false
     const tick = async () => {
       const clock = broadcastTimeRef.current
       if (!clock || document.hidden || controller.signal.aborted) return
       const time = clock.time + (videoRef.current.paused ? 0 : Math.max(0, videoRef.current.currentTime - clock.mediaTime) * 1000)
       setCaption(program && time >= program.startTime && time < program.endTime ? activeCaption(cues, (time - program.startTime) / 1000) : '')
-      if (program && time >= program.endTime) { program = null; cues = []; nextCheck = 0 }
+      if (program && time >= program.endTime) { program = null; cues = []; loadedUrl = null; nextCheck = 0 }
       if (busy || Date.now() < nextCheck) return
       busy = true
       try {
@@ -193,11 +193,12 @@ function App() {
         if (!res.ok) throw new Error('Captions unavailable')
         const next = await res.json()
         if (controller.signal.aborted) return
-        if (next.id !== program?.id) { cues = []; setCaption(''); program = next }
-        if (!cues.length && next.captions?.url) {
+        if (next.id !== program?.id) { cues = []; loadedUrl = null; setCaption(''); program = next }
+        if (next.captions?.url && next.captions.url !== loadedUrl) {
           const sub = await fetch(next.captions.url, { signal: controller.signal })
           if (!sub.ok) throw new Error('Captions unavailable')
           cues = parseCaptions(await sub.text())
+          loadedUrl = next.captions.url
         }
         if (!controller.signal.aborted) setCaptionStatus(cues.length ? '' : next.captions?.status === 'preparing' ? 'Loading captions' : 'No captions for this program')
         nextCheck = Date.now() + (next.captions?.status === 'preparing' ? 2000 : 5000)
@@ -481,6 +482,13 @@ function App() {
         if (!res.ok) throw new Error('Guide unavailable')
         const data = await res.json()
         if (data.serverTime) serverOffsetRef.current = data.serverTime - (sent + Date.now()) / 2
+        if (data.channels) setChannels(previous => {
+          const known = new Set(previous.map(channel => channel.slug))
+          const additions = Object.values(data.channels)
+            .filter(channel => channel?.slug && !known.has(channel.slug))
+            .map(channel => ({ name: channel.name, slug: channel.slug }))
+          return additions.length ? [...previous, ...additions] : previous
+        })
         setGuideData(data)
         setCurrentTime(new Date(Date.now() + serverOffsetRef.current))
         if (initial && data.dayStart) {
@@ -746,8 +754,11 @@ function App() {
                     return (
                       <div
                         key={slug}
+                        role="button"
+                        tabIndex={0}
                         className={`guide-channel-name ${channels[currentChannelIndex]?.slug === slug ? 'current' : ''}`}
                         onClick={() => selectChannelFromGuide(slug)}
+                        onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectChannelFromGuide(slug) } }}
                       >
                         {channelNum}. {channelData.name}
                       </div>
@@ -784,7 +795,7 @@ function App() {
                             key={`${show.hash}:${show.startTime}`}
                             role="button" tabIndex={0}
                             onClick={() => selectChannelFromGuide(slug)}
-                            onKeyDown={event => { if (event.key === 'Enter') selectChannelFromGuide(slug) }}
+                            onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectChannelFromGuide(slug) } }}
                             title={`${show.title} · ${formatTime(show.startTime)}–${formatTime(show.endTime)}`}
                             className={`guide-show ${isCurrent ? 'current' : ''}`}
                             style={{

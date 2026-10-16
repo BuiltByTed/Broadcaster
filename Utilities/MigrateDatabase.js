@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const Log = require('./Log.js')
+const HLS_CACHE_VERSION = require('./HlsCacheVersion.js')
 const tag = 'Migration'
 
 const { CACHE_DIR } = process.env
@@ -12,6 +13,7 @@ const { CACHE_DIR } = process.env
  * Scans the cache directory and marks videos as transcoded if HLS files exist
  */
 function migrateExistingVideos(channelSlug) {
+    const cacheDir = process.env.CACHE_DIR || CACHE_DIR
     const db = Database()
     const channel = db.getChannelBySlug(channelSlug)
 
@@ -29,53 +31,72 @@ function migrateExistingVideos(channelSlug) {
             return
         }
         if (video.transcoded) return
-        const videoDir = path.join(CACHE_DIR, 'channels', channelSlug, 'videos', video.hash)
+        const videoDir = path.join(cacheDir, 'channels', channelSlug, 'videos', video.hash)
         // Import quarantine markers once; healthy rows require no filesystem I/O.
         if (fs.existsSync(path.join(videoDir, 'invalid-cache.json'))) {
             db.quarantineVideo(video.id)
             return
         }
 
-        const playlistPath = path.join(videoDir, 'index.m3u8')
-        const metadataPath = path.join(videoDir, 'metadata.json')
+        const candidates = [
+            { dir: path.join(videoDir, `v${HLS_CACHE_VERSION}`), cacheVersion: HLS_CACHE_VERSION },
+            { dir: videoDir, cacheVersion: 0 }
+        ]
 
-        // Check if video is fully transcoded
-        if (fs.existsSync(playlistPath) && fs.existsSync(metadataPath)) {
-            try {
-                const playlistContent = fs.readFileSync(playlistPath, 'utf8')
+        for (const candidate of candidates) {
+            const playlistPath = path.join(candidate.dir, 'index.m3u8')
+            const metadataPath = path.join(candidate.dir, 'metadata.json')
 
-                // Must have ENDLIST marker to be considered complete
-                if (playlistContent.includes('#EXT-X-ENDLIST')) {
-                    // Calculate duration from playlist
-                    let duration = 0
-                    let segmentCount = 0
-                    playlistContent.split('\n').forEach(line => {
-                        if (line.startsWith('#EXTINF:')) {
-                            const match = line.match(/#EXTINF:([\d.]+)/)
-                            if (match) duration += parseFloat(match[1])
-                            segmentCount++
+            // Check if video is fully transcoded
+            if (fs.existsSync(playlistPath) && fs.existsSync(metadataPath)) {
+                try {
+                    const playlistContent = fs.readFileSync(playlistPath, 'utf8')
+
+                    // Must have ENDLIST marker to be considered complete
+                    if (playlistContent.includes('#EXT-X-ENDLIST')) {
+                        // Calculate duration from playlist
+                        let duration = 0
+                        let segmentCount = 0
+                        let maxDuration = 0
+                        playlistContent.split(/\r?\n/).forEach(line => {
+                            if (line.startsWith('#EXTINF:')) {
+                                const match = line.match(/#EXTINF:([\d.]+)/)
+                                if (match) {
+                                    const segDuration = parseFloat(match[1])
+                                    duration += segDuration
+                                    if (segDuration > maxDuration) maxDuration = segDuration
+                                }
+                                segmentCount++
+                            }
+                        })
+
+                        // Read metadata if available
+                        let videoCodec = null
+                        let audioCodec = null
+                        let width = null
+                        let height = null
+                        let cacheVersion = candidate.cacheVersion
+
+                        try {
+                            const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+                            if (Number.isInteger(metadata.cacheVersion)) {
+                                cacheVersion = metadata.cacheVersion
+                            }
+                        } catch (e) {
+                            // Ignore metadata read errors
                         }
-                    })
 
-                    // Read metadata if available
-                    let videoCodec = null
-                    let audioCodec = null
-                    let width = null
-                    let height = null
-
-                    try {
-                        const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
-                        // Metadata might not have codec info, that's okay
-                    } catch (e) {
-                        // Ignore metadata read errors
+                        // Mark as transcoded
+                        db.markVideoTranscoded(video.id, duration, segmentCount, videoCodec, audioCodec, width, height, cacheVersion)
+                        if (maxDuration > 0 && db.updateSegmentMetadata) {
+                            db.updateSegmentMetadata(video.id, { maxDuration, duration, segments: { length: segmentCount } })
+                        }
+                        migratedCount++
+                        break
                     }
-
-                    // Mark as transcoded
-                    db.markVideoTranscoded(video.id, duration, segmentCount, videoCodec, audioCodec, width, height)
-                    migratedCount++
+                } catch (err) {
+                    Log(tag, `Error migrating ${video.filename}: ${err.message}`)
                 }
-            } catch (err) {
-                Log(tag, `Error migrating ${video.filename}: ${err.message}`)
             }
         }
     })
@@ -124,12 +145,18 @@ function backfillDurations() {
 
     Log(tag, `Backfilling durations/segments for ${videos.length} videos...`)
 
+    const cacheDir = process.env.CACHE_DIR || CACHE_DIR
     let updated = 0
     videos.forEach(video => {
-        const videoDir = path.join(CACHE_DIR, 'channels', video.channel_slug, 'videos', video.hash)
-        const playlistPath = path.join(videoDir, 'index.m3u8')
+        const videoDir = path.join(cacheDir, 'channels', video.channel_slug, 'videos', video.hash)
+        const candidatePaths = [
+            ...(video.cache_version ? [path.join(videoDir, `v${video.cache_version}`, 'index.m3u8')] : []),
+            path.join(videoDir, `v${HLS_CACHE_VERSION}`, 'index.m3u8'),
+            path.join(videoDir, 'index.m3u8')
+        ]
+        const playlistPath = candidatePaths.find(p => fs.existsSync(p))
 
-        if (!fs.existsSync(playlistPath)) {
+        if (!playlistPath) {
             Log(tag, `Playlist not found for ${video.filename}, skipping`)
             return
         }
@@ -139,7 +166,7 @@ function backfillDurations() {
             let duration = 0
             let segmentCount = 0
 
-            playlistContent.split('\n').forEach(line => {
+            playlistContent.split(/\r?\n/).forEach(line => {
                 if (line.startsWith('#EXTINF:')) {
                     const match = line.match(/#EXTINF:([\d.]+)/)
                     if (match) duration += parseFloat(match[1])

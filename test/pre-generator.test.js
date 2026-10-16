@@ -690,3 +690,85 @@ test('generateVideo marks invalid-input ffmpeg exit as unreadable and resolves',
     assert.equal(skipLog.context.level, 'warn')
     assert.equal(logs.some(entry => /Failed to generate|^Error:/.test(entry.message)), false)
 })
+
+test('prioritizes database-positive videos with missing cache files ahead of healthy legacy upgrades', t => {
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-priority-missing-'))
+    t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))
+    const rows = [
+        { id: 1, file_path: '/media/healthy-legacy.mp4', transcoded: 1, cache_version: 0 },
+        { id: 2, file_path: '/media/missing-cache.mp4', transcoded: 1, cache_version: 0 }
+    ]
+    const encoder = loadPreGenerator(cacheDir, {
+        getChannelVideos: () => rows
+    })
+    encoder.isMarkedUnreadable = () => false
+    encoder.isAlreadyGenerated = filePath => filePath === '/media/healthy-legacy.mp4'
+    encoder.queueChannel({ slug: 'priority' })
+    assert.deepEqual(encoder.channelQueues[0].map(video => video.videoId), [2, 1])
+
+    // Also verify cross-channel buildInterleavedQueue prioritizes missing streams before legacy upgrades
+    const rowsCh2 = [{ id: 3, file_path: '/media/ch2-new.mp4', transcoded: 0, cache_version: 0 }]
+    const encoderMulti = loadPreGenerator(cacheDir, {
+        getChannelVideos: (slug, ready) => {
+            if (slug === 'ch1') return rows.slice(0, 1)
+            return ready ? [] : rowsCh2
+        }
+    })
+    encoderMulti.isMarkedUnreadable = () => false
+    encoderMulti.isAlreadyGenerated = () => true
+    encoderMulti.queueChannel({ slug: 'ch1' })
+    encoderMulti.queueChannel({ slug: 'ch2' })
+    encoderMulti.buildInterleavedQueue()
+    assert.deepEqual(encoderMulti.generationQueue.map(v => v.videoId), [3, 1])
+})
+
+test('deletePartialGeneration removes nested subdirectories without EISDIR errors', t => {
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-partial-dir-'))
+    t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))
+    const logs = []
+    const encoder = loadPreGenerator(cacheDir, createDatabase('/library/news.mkv', []), { logs })
+    const outputDir = path.join(cacheDir, 'channels', 'news', 'videos', 'abc')
+    fs.mkdirSync(path.join(outputDir, 'v3'), { recursive: true })
+    fs.writeFileSync(path.join(outputDir, 'index.m3u8'), '#EXTM3U\n')
+    fs.writeFileSync(path.join(outputDir, 'v3', 'unreadable.json'), '{}')
+
+    encoder.deletePartialGeneration(outputDir, 'news.mkv')
+    assert.equal(fs.existsSync(outputDir), false)
+    assert.equal(logs.some(l => /Failed to delete incomplete generation/.test(l.message)), false)
+})
+
+test('generateVideo falls back to uncropped encoding when presentation analysis throws', async t => {
+    const childProcess = require('child_process')
+    const { EventEmitter } = require('events')
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-crop-fallback-'))
+    t.after(() => fs.rmSync(cacheDir, { recursive: true, force: true }))
+
+    const filePath = '/library/fallback.mkv'
+    const logs = []
+    const db = createDatabase(filePath, [])
+    db.markVideoTranscoded = () => {}
+    db.updateSegmentMetadata = () => {}
+    const encoder = loadPreGenerator(cacheDir, db, { logs })
+    const channel = { slug: 'news', name: 'News' }
+
+    t.mock.method(childProcess, 'execFileSync', () => { throw new Error('no gpu') })
+    t.mock.method(childProcess, 'spawn', (_cmd, args) => {
+        const outIndex = args.at(-1)
+        const outDir = path.dirname(outIndex)
+        fs.mkdirSync(outDir, { recursive: true })
+        fs.writeFileSync(path.join(outDir, 'stream.ts'), Buffer.alloc(200))
+        fs.writeFileSync(outIndex, '#EXTM3U\n#EXTINF:1.0,\n#EXT-X-BYTERANGE:100@0\nstream.ts\n#EXT-X-ENDLIST\n')
+        const proc = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.kill = () => {}
+        process.nextTick(() => proc.emit('close', 0))
+        return proc
+    })
+
+    encoder.probeVideo = async () => ({ codec: 'h264', width: 640, height: 480, pixFmt: 'yuv420p', audioCodec: 'aac' })
+    encoder.getPresentation = async () => { throw new Error('Presentation analysis unavailable') }
+
+    await encoder.generateVideo(41, filePath, channel)
+    assert.equal(logs.some(l => /Proceeding without crop analysis/.test(l.message)), true)
+})

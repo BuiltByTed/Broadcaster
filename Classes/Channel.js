@@ -15,7 +15,14 @@ function findFiles(dir, fileList = [], visited = new Set()) {
   visited.add(real)
   for (const file of fs.readdirSync(dir, { withFileTypes: true })) {
     const filePath = path.join(dir, file.name)
-    const stat = file.isSymbolicLink() ? fs.statSync(filePath) : file
+    let stat = file
+    if (file.isSymbolicLink()) {
+      try {
+        stat = fs.statSync(filePath)
+      } catch {
+        continue
+      }
+    }
     if (stat.isDirectory()) findFiles(filePath, fileList, visited)
     else if (stat.isFile()) fileList.push(filePath)
   }
@@ -23,6 +30,9 @@ function findFiles(dir, fileList = [], visited = new Set()) {
 }
 
 function Channel(definition) {
+  if (!(this instanceof Channel)) {
+    return new Channel(definition)
+  }
   if (!definition || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(definition.slug || '') ||
       ['static', 'static-4x3', '__proto__', 'constructor', 'prototype'].includes(definition.slug)) {
     throw new Error('Channel slug must be a unique URL-safe name')

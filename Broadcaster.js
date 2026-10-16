@@ -23,6 +23,7 @@ const cleanup = () => {
   try {
     PreGenerator.stopActiveWorkers()
     require('./Utilities/MediaPresentation.js').stop()
+    require('./Utilities/Subtitles.js').stop()
   } catch (e) {
     Log(tag, `Error stopping ffmpeg workers: ${e.message}`, undefined, { error: e, phase: 'cleanup' })
   }
@@ -34,6 +35,11 @@ const shutdown = async () => {
   shuttingDown = true
   if (uiStarted) TelevisionUI().stop()
   cleanup()
+  try {
+    require('./Utilities/Database.js').closeIfOpen?.()
+  } catch (e) {
+    // Continue shutdown even if DB close fails.
+  }
   // Ship the buffered tail before exiting; never let a stuck POST block the stop.
   try {
     await Promise.race([
@@ -66,7 +72,7 @@ function loadChannels() {
       ]
       fs.mkdirSync(path.dirname(channelsPath), { recursive: true })
       fs.writeFileSync(channelsPath, JSON.stringify(defaultChannels, null, 2))
-      Log(tag, `Created default channels.json. Edit ${CHANNEL_LIST} to configure your channels.`)
+      Log(tag, `Created default channels.json. Edit ${CHANNEL_LIST || channelsPath} to configure your channels.`)
     }
 
     const data = fs.readFileSync(channelsPath)
@@ -93,7 +99,7 @@ function initializeChannels(channelDefinitions, dependencies = {}) {
     } catch (e) {
       const channelName = definition && (definition.name || definition.slug)
       const channelDescription = channelName ? ` "${channelName}"` : ''
-      log(tag, `Unable to create channel${channelDescription}: ${e}`)
+      log(tag, `Unable to create channel${channelDescription}: ${e}`, undefined, { error: e, channel_slug: definition && definition.slug })
     }
   })
 }

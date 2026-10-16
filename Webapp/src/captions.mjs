@@ -6,7 +6,7 @@ export function parseCaptions(vtt) {
     if (index < 0) return []
     const [from, to] = lines[index].split(' --> ')
     const start = timestamp(from.trim()), end = timestamp(to.trim().split(/\s/)[0])
-    const text = lines.slice(index + 1).join('\n').replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
+    const text = lines.slice(index + 1).join('\n').replace(/<[^>]*>|\{\\[^}]*\}/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
     return Number.isFinite(start) && end > start && text ? [{ start, end, text }] : []
   }).sort((a, b) => a.start - b.start)
 }

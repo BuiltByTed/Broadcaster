@@ -183,6 +183,7 @@ class PreGenerator {
         this.isGenerating = false
         /** @type {Set<import('child_process').ChildProcess>} */
         this.activeProcesses = new Set()
+        this.upgradeOnlyItems = new WeakSet()
         this.shuttingDown = false
     }
 
@@ -262,7 +263,7 @@ class PreGenerator {
             if (fs.existsSync(outputDir)) {
                 for (const file of fs.readdirSync(outputDir)) {
                     try {
-                        fs.unlinkSync(path.join(outputDir, file))
+                        fs.rmSync(path.join(outputDir, file), { recursive: true, force: true })
                     } catch (_) {
                         // best-effort cleanup
                     }
@@ -300,7 +301,7 @@ class PreGenerator {
         try {
             const files = fs.readdirSync(outputDir)
             for (const file of files) {
-                fs.unlinkSync(path.join(outputDir, file))
+                fs.rmSync(path.join(outputDir, file), { recursive: true, force: true })
             }
             fs.rmdirSync(outputDir)
             Log(tag, `Deleted incomplete generation for ${fileName}`)
@@ -541,12 +542,14 @@ class PreGenerator {
             }
         }
 
-        // Save manifest
+        // Save manifest atomically
         const dir = path.dirname(manifestPath)
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true })
         }
-        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+        const tempManifestPath = `${manifestPath}.${process.pid}.tmp`
+        fs.writeFileSync(tempManifestPath, JSON.stringify(manifest, null, 2))
+        fs.renameSync(tempManifestPath, manifestPath)
 
         if (added > 0 || removed > 0 || orphansDeleted > 0) {
             Log(tag, `Manifest updated: +${added} added, -${removed} removed, ${orphansDeleted} orphans deleted`, channel)
@@ -597,19 +600,27 @@ class PreGenerator {
                 continue
             }
             // Database-positive rows still need their cached files verified.
+            const hasValidCache = transcodedPaths.has(video.file_path) &&
+                this.isAlreadyGenerated(video.file_path, channel.slug, video)
+            if (!hasValidCache) {
+                transcodedPaths.delete(video.file_path)
+            }
             if (
-                transcodedPaths.has(video.file_path) &&
-                this.isAlreadyGenerated(video.file_path, channel.slug, video) &&
+                hasValidCache &&
                 (video.cache_version || 0) >= HLS_CACHE_VERSION
             ) {
                 skippedCount++
             } else {
                 // Not transcoded or cache is incomplete, needs transcoding
-                channelQueue.push({
+                const item = {
                     videoId: video.id,
                     filePath: video.file_path,
                     channel
-                })
+                }
+                if (hasValidCache) {
+                    this.upgradeOnlyItems.add(item)
+                }
+                channelQueue.push(item)
             }
         }
 
@@ -640,6 +651,8 @@ class PreGenerator {
             }
         }
 
+        this.channelQueues = this.channelQueues.filter(q => q.length > 0)
+        this.generationQueue.sort((a, b) => Number(this.upgradeOnlyItems.has(a)) - Number(this.upgradeOnlyItems.has(b)))
         this.totalVideos = this.generationQueue.length
     }
 
@@ -767,7 +780,15 @@ class PreGenerator {
     async generateVideo(videoId, filePath, channel, options = {}) {
         const videoInfo = await this.probeVideo(filePath)
         if (this.shuttingDown) throw new Error('Generation is stopping')
-        const presentation = isUnreadableProbeResult(videoInfo) ? null : await this.getPresentation(filePath, videoInfo)
+        let presentation = null
+        if (!isUnreadableProbeResult(videoInfo)) {
+            try {
+                presentation = await this.getPresentation(filePath, videoInfo)
+            } catch (err) {
+                if (this.shuttingDown) throw new Error('Generation is stopping')
+                Log(tag, `Proceeding without crop analysis for ${path.basename(filePath)}: ${err.message}`, channel, { level: 'warn', file_path: filePath })
+            }
+        }
         if (this.shuttingDown) throw new Error('Generation is stopping')
         return new Promise((resolve, reject) => {
             const videoHash = this.getVideoHash(filePath)
@@ -893,6 +914,9 @@ class PreGenerator {
 
             ffmpeg.on('close', (code) => {
                 if (this.shuttingDown) {
+                    if (fs.existsSync(outputDir) && !fs.existsSync(path.join(outputDir, 'metadata.json'))) {
+                        this.deletePartialGeneration(outputDir, baseName)
+                    }
                     reject(new Error('FFmpeg stopped during shutdown'))
                     return
                 }
@@ -958,6 +982,9 @@ class PreGenerator {
 
                     resolve()
                   } catch (error) {
+                    if (fs.existsSync(outputDir) && !fs.existsSync(path.join(outputDir, 'metadata.json'))) {
+                        this.deletePartialGeneration(outputDir, baseName)
+                    }
                     reject(error)
                   }
                 } else if (hasGPU && !options.forceCpu) {
@@ -981,6 +1008,9 @@ class PreGenerator {
                     })
                     resolve({ skipped: true, reason: 'unreadable' })
                 } else {
+                    if (fs.existsSync(outputDir) && !fs.existsSync(path.join(outputDir, 'metadata.json'))) {
+                        this.deletePartialGeneration(outputDir, baseName)
+                    }
                     // Unexpected encode failure. Avoid the log-monitor signature "Failed to generate".
                     // Keep stderr detail in context only — a second "Error: …" line was a signature of its own.
                     Log(tag, `Could not generate ${baseName} (exit code ${code})`, channel, {
@@ -995,6 +1025,9 @@ class PreGenerator {
             })
 
             ffmpeg.on('error', (err) => {
+                if (fs.existsSync(outputDir) && !fs.existsSync(path.join(outputDir, 'metadata.json'))) {
+                    this.deletePartialGeneration(outputDir, baseName)
+                }
                 Log(tag, `Could not start ffmpeg for ${baseName}: ${err.message}`, channel, {
                     level: 'error',
                     error: err,

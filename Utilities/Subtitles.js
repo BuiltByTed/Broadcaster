@@ -7,12 +7,16 @@ const Sqlite = require('better-sqlite3')
 const TEXT_CODECS = new Set(['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text', 'sami'])
 const MAX_SUBTITLE_BYTES = 5 * 1024 * 1024
 const jobs = new Map()
-let running = 0
+const processes = new Set()
+let running = 0, stopping = false
 
 function run(command, args, input) {
   return new Promise((resolve, reject) => {
+    if (stopping) return reject(new Error('Subtitle conversion stopping'))
     const child = execFile(command, args, { timeout: 90000, maxBuffer: MAX_SUBTITLE_BYTES, encoding: 'utf8', env: { ...process.env, AV_LOG_FORCE_NOCOLOR: '1' } },
       (error, stdout) => error ? reject(new Error('Subtitle conversion failed')) : resolve(stdout))
+    processes.add(child)
+    child.once('close', () => processes.delete(child))
     child.stdin.on('error', () => {})
     child.stdin.end(input)
   })
@@ -91,7 +95,7 @@ async function localSubtitle(filePath) {
     if (!base.startsWith(stem + '.')) return false
     const tags = base.slice(stem.length + 1).toLowerCase().split(/[. _-]+/)
     return tags.every(tag => ['en', 'eng', 'english', 'sdh', 'cc', 'default'].includes(tag))
-  }).sort((a, b) => Number(b.includes('.en')) - Number(a.includes('.en')))
+  }).sort((a, b) => Number(/\.en/i.test(b)) - Number(/\.en/i.test(a)))
   for (const name of candidates) {
     try {
       const full = path.join(directory, name)
@@ -160,4 +164,10 @@ async function getSubtitles(filePath) {
   return { status: jobs.get(key)?.failedAt ? 'unavailable' : 'preparing', key }
 }
 
-module.exports = { getSubtitles, keyFor, directory, subtitleRank, mapPlexPath, extract }
+function stop() {
+  stopping = true
+  jobs.clear()
+  for (const child of processes) child.kill('SIGKILL')
+}
+
+module.exports = { getSubtitles, keyFor, directory, subtitleRank, mapPlexPath, extract, stop }

@@ -160,3 +160,17 @@ test('scanning terminates when directory symlinks form a cycle', () => {
     assert.equal(insertedVideos.length, 1)
   } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
+
+test('skips broken symlinks inside a directory without aborting the scan and constructs without new', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'broadcaster-dangling-'))
+  const videoPath = path.join(root, 'valid.mp4')
+  fs.writeFileSync(videoPath, 'test')
+  fs.symlinkSync(path.join(root, 'nonexistent-target.mp4'), path.join(root, 'dangling.mp4'))
+  insertedVideos.length = 0
+  try {
+    const instance = Channel({ slug: 'dangling-test', name: 'Dangling', type: 'shuffle', paths: [root] })
+    assert.ok(instance instanceof Channel)
+    assert.equal(globalThis.slug, undefined)
+    assert.deepEqual(insertedVideos, [videoPath])
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

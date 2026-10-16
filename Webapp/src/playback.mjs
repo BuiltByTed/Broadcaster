@@ -5,6 +5,7 @@ import { warmLoader } from './channelWarmup.mjs'
 // session cannot restart a channel the viewer has already left.
 export function startPlayback({ video, url, cache, onClock, onProgram, onPlaying, onStatus, onBlocked }) {
   let disposed = false
+  let blocked = false
   let hls = null
   let retryTimer = null
   let attempts = 0
@@ -12,7 +13,10 @@ export function startPlayback({ video, url, cache, onClock, onProgram, onPlaying
   let lastMediaRecovery = 0
   const isNative = !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')
   const play = () => video.play().catch(error => {
-    if (!disposed && error.name === 'NotAllowedError') onBlocked(true)
+    if (!disposed && error.name === 'NotAllowedError') {
+      blocked = true
+      onBlocked(true)
+    }
   })
   const progress = () => {
     lastProgress = Date.now()
@@ -25,6 +29,7 @@ export function startPlayback({ video, url, cache, onClock, onProgram, onPlaying
   const playing = () => {
     progress()
     attempts = 0
+    blocked = false
     onBlocked(false)
     onStatus('')
     onPlaying()
@@ -69,7 +74,7 @@ export function startPlayback({ video, url, cache, onClock, onProgram, onPlaying
         }
       })
       player.on(Hls.Events.FRAG_CHANGED, (_, { frag }) => {
-        const match = new URL(frag.url).pathname.match(/\/channels\/([^/]+)\/videos\/([a-f0-9]{32})(?:\/v(\d+))?\//)
+        const match = new URL(frag.url, location.href).pathname.match(/\/channels\/([^/]+)\/videos\/([a-f0-9]{32})(?:\/v(\d+))?\//)
         if (match && !disposed) onProgram?.({ slug: match[1], hash: match[2], cacheVersion: Number(match[3] || 0) })
       })
       player.on(Hls.Events.MANIFEST_PARSED, () => { if (!disposed && hls === player) play() })
@@ -95,7 +100,7 @@ export function startPlayback({ video, url, cache, onClock, onProgram, onPlaying
   video.addEventListener('error', retry)
   window.addEventListener('online', online)
   const watchdog = setInterval(() => {
-    if (!disposed && !document.hidden && Date.now() - lastProgress > 15000) retry()
+    if (!disposed && !blocked && !document.hidden && Date.now() - lastProgress > 15000) retry()
   }, 5000)
   load()
   return () => {

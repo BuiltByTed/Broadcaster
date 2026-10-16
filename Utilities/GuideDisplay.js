@@ -16,7 +16,10 @@ function describeVideo(filePath, roots = []) {
   else if (/\{(?:tvdb|tmdb|imdb)-/i.test(rootName) || /^season\s*\d+$/i.test(relative[0] || '')) title = rootName
   else if (relative.length > 1) title = relative[0]
   else if (relative.length === 1) title = path.basename(filePath, path.extname(filePath))
-  else title = path.basename(path.dirname(filePath))
+  else {
+    const dir = path.dirname(filePath)
+    title = dir && dir !== '.' ? path.basename(dir) : path.basename(filePath, path.extname(filePath))
+  }
   title = cleanTitle(title)
   if (/beavis.*butt[ -]*head/i.test(title)) title = 'Beavis and Butt-Head'
   return { title, episodeTitle: path.basename(filePath, path.extname(filePath)) }

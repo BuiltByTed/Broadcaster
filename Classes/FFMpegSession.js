@@ -48,7 +48,8 @@ function checkNvidiaGPU() {
 
 function buildFFmpegArgs(file, output, channel) {
     const useGPU = VIDEO_CODEC === 'h264_nvenc' && checkNvidiaGPU()
-    const [width, height] = DIMENSIONS.split('x')
+    const dims = DIMENSIONS || '640x480'
+    const [width, height] = dims.split('x')
 
     // Base input args with GPU decoding if available
     const inputArgs = useGPU
@@ -71,12 +72,12 @@ function buildFFmpegArgs(file, output, channel) {
         // Fallback to software encoding if NVENC requested but GPU not available
         videoCodec = 'libx264'
         videoPreset = 'veryfast'
-        videoFilter = `${deinterlacePrefix(VIDEO_FILTER, false) || 'yadif,'}scale=${DIMENSIONS}`
+        videoFilter = `${deinterlacePrefix(VIDEO_FILTER, false) || 'yadif,'}scale=${dims}`
         Log(tag, 'GPU requested but not available - falling back to software encoding', channel)
     } else {
         // CPU encoding path — yadif_cuda is not available on CPU, map to yadif
         const cpuFilter = VIDEO_FILTER === 'yadif_cuda' ? 'yadif' : VIDEO_FILTER
-        videoFilter = `${cpuFilter ? `${cpuFilter},` : ''}scale=${DIMENSIONS}`
+        videoFilter = `${cpuFilter ? `${cpuFilter},` : ''}scale=${dims}`
     }
 
     // Build encoding args
@@ -145,7 +146,6 @@ function FFMpegSession(channel) {
             Log(tag, `FFMpeg finished encoding ${file} in ${(Date.now() - start)/1000} seconds.`, channel)
         } else {
             Log(tag, `FFMpeg produced an error (exit code ${code}), so we're skipping to next file.`, channel, { exit_code: code, file, ffmpeg_stderr_tail: stderrData.slice(-500) })
-            Log(tag, `Error output: ${stderrData}`, channel)
             channel.currentPlaylistIndex++
             if (channel.segmenter) {
                 channel.segmenter.advance()

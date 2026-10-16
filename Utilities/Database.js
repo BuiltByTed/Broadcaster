@@ -16,7 +16,8 @@ class DatabaseManager {
      * Initialize the database connection and schema
      */
     initialize() {
-        const dbPath = path.join(CACHE_DIR, 'broadcaster.db')
+        const cacheDir = process.env.CACHE_DIR || CACHE_DIR
+        const dbPath = path.join(cacheDir, 'broadcaster.db')
         Log(tag, `Initializing database at ${dbPath}`)
 
         fs.mkdirSync(path.dirname(dbPath), { recursive: true })
@@ -94,12 +95,9 @@ class DatabaseManager {
             this.db.exec('ALTER TABLE videos ADD COLUMN cache_version INTEGER NOT NULL DEFAULT 0')
         }
 
-        // Add segment_count column if it doesn't exist (migration for existing DBs)
-        try {
-            this.db.exec(`ALTER TABLE videos ADD COLUMN segment_count INTEGER`)
+        if (!columns.some(column => column.name === 'segment_count')) {
+            this.db.exec('ALTER TABLE videos ADD COLUMN segment_count INTEGER')
             Log(tag, 'Added segment_count column to videos table')
-        } catch (e) {
-            // Column already exists, ignore
         }
     }
 
@@ -281,6 +279,11 @@ class DatabaseManager {
     close() {
         if (this.db) {
             this.db.close()
+            this.db = null
+            this.insertVideoStatement = null
+            if (instance === this) {
+                instance = null
+            }
             Log(tag, 'Database connection closed')
         }
     }
@@ -290,9 +293,14 @@ class DatabaseManager {
 let instance = null
 
 module.exports = () => {
-    if (!instance) {
+    if (!instance || !instance.db) {
         instance = new DatabaseManager()
         instance.initialize()
     }
     return instance
+}
+module.exports.closeIfOpen = () => {
+    if (instance) {
+        instance.close()
+    }
 }

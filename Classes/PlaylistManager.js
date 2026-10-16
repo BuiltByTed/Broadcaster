@@ -4,6 +4,7 @@ const crypto = require('crypto')
 const Log = require('../Utilities/Log.js')
 const Database = require('../Utilities/Database.js')
 const { parseHlsPlaylist } = require('../Utilities/HlsPlaylist.js')
+const { describeVideo } = require('../Utilities/GuideDisplay.js')
 const tag = 'PlaylistManager'
 function adjacentDay(time, offset) { const date = new Date(time); date.setDate(date.getDate() + offset); return date.getTime() }
 const { CACHE_DIR, HLS_SEGMENT_LENGTH_SECONDS } = process.env
@@ -306,7 +307,9 @@ class PlaylistManager {
             segmentTime = next.startTime
         }
         if (!segments.length) return this.getEmptyPlaylist()
-        const target = this.targetDuration || Math.ceil(segments.reduce((max, segment) => Math.max(max, segment.duration), 2))
+        const windowTarget = Math.ceil(segments.reduce((max, segment) => Math.max(max, segment.duration), 2))
+        const target = Math.max(this.targetDuration || 0, windowTarget)
+        if (this.targetDuration && target > this.targetDuration) this.targetDuration = target
         let playlist = '#EXTM3U\n#EXT-X-VERSION:6\n'
         playlist += `#EXT-X-TARGETDURATION:${target}\n`
         playlist += `#EXT-X-MEDIA-SEQUENCE:${position.mediaSequence + startIndex}\n`
@@ -360,7 +363,9 @@ class PlaylistManager {
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true })
         }
-        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+        const tempManifestPath = `${manifestPath}.${process.pid}.tmp`
+        fs.writeFileSync(tempManifestPath, JSON.stringify(manifest, null, 2))
+        fs.renameSync(tempManifestPath, manifestPath)
     }
 
     /**
@@ -390,14 +395,7 @@ class PlaylistManager {
      * Get a friendly display name for a video
      */
     getVideoDisplayName(filePath) {
-        if (this.channel.paths) {
-            for (const configuredPath of this.channel.paths) {
-                if (filePath.startsWith(configuredPath)) {
-                    return path.basename(configuredPath)
-                }
-            }
-        }
-        return path.basename(path.dirname(filePath))
+        return describeVideo(filePath, this.channel.paths).title
     }
 
     /**

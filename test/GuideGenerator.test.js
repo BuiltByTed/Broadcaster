@@ -387,3 +387,23 @@ test('a removed program from yesterday cannot create an unplayable overlap', () 
   assert.equal(guide.schedule[0].startTime, dayStart)
   assert.equal(guide.schedule.some(entry => entry.hash === 'removed'), false)
 })
+
+test('getScheduleForAPI preserves entry title when filePath is absent', () => {
+  const generator = new GuideGenerator({ slug: 'api-title', name: 'Test', paths: ['/media'] })
+  const now = Date.now()
+  generator.getActiveGuide = () => ({
+    dayStart: now - 1000,
+    dayEnd: now + 3600000,
+    schedule: [{
+      hash: 'abc123',
+      title: 'Classic Show',
+      startTime: now - 500,
+      endTime: now + 500,
+      duration: 1
+    }]
+  })
+  const apiSchedule = generator.getScheduleForAPI()
+  assert.equal(apiSchedule.length, 1)
+  assert.equal(apiSchedule[0].title, 'Classic Show')
+  assert.equal(apiSchedule[0].isCurrent, true)
+})

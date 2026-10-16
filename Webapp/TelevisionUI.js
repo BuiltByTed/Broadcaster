@@ -3,7 +3,7 @@ const Log = require('../Utilities/Log.js')
 const { newCorrelationId } = require('../Utilities/LogContext.js')
 const Database = require('../Utilities/Database.js')
 const PreGenerator = require('../Utilities/PreGenerator.js')
-const { getPrevious3am } = require('../Utilities/GuideGenerator.js')
+const { getPrevious3am, getNext3am } = require('../Utilities/GuideGenerator.js')
 const tag = 'TelevisionUI'
 const compression = require('compression')
 const { mountPublicStatic } = require('./staticAssets.js')
@@ -32,12 +32,12 @@ function msUntilNext3am() {
 }
 
 // Generate new guides for all channels at 3am
-function regenerateAllGuides() {
+function regenerateAllGuides(targetDayStart) {
     Log(tag, 'Regenerating guides for all channels (3am)')
 
+    const dayStart = Number.isFinite(targetDayStart) ? targetDayStart : getPrevious3am()
     ChannelPool().queue.forEach(channel => {
         if (channel.started && channel.guideGenerator) {
-            const dayStart = getPrevious3am()
             channel.guideGenerator.getGuideForDay(dayStart)
         }
     })
@@ -51,14 +51,20 @@ function scheduleDaily3amRegeneration() {
         clearTimeout(guideRegenerationTimer)
     }
 
-    const msUntil3am = msUntilNext3am()
+    const target3am = getNext3am()
+    const msUntil3am = Math.max(100, target3am - Date.now())
     const hoursUntil = (msUntil3am / (1000 * 60 * 60)).toFixed(1)
     Log(tag, `Next guide regeneration scheduled in ${hoursUntil} hours (at 3am)`)
 
     guideRegenerationTimer = setTimeout(() => {
-        try { regenerateAllGuides() } catch (error) { Log(tag, 'Guide regeneration failed', undefined, { error }) }
+        if (Date.now() < target3am) {
+            scheduleDaily3amRegeneration()
+            return
+        }
+        try { regenerateAllGuides(target3am) } catch (error) { Log(tag, 'Guide regeneration failed', undefined, { error }) }
         finally { scheduleDaily3amRegeneration() }
     }, msUntil3am)
+    guideRegenerationTimer.unref?.()
 }
 
 // Client-facing payloads must never include absolute host filesystem paths.
@@ -122,7 +128,7 @@ class TelevisionUI {
         const startup = channelPool.getStartupStatus()
         const degraded = startup.state === 'degraded'
 
-        res.status(degraded ? 503 : 200).json({
+        res.set('Cache-Control', 'no-store').status(degraded ? 503 : 200).json({
             ok: !degraded,
             service: 'broadcaster',
             timestamp: new Date().toISOString(),
@@ -185,7 +191,7 @@ class TelevisionUI {
                     : 0
             }
         })
-        res.json({
+        res.set('Cache-Control', 'no-store').json({
             channels: stats,
             generation: PreGenerator.getProgress(),
             totals: {
@@ -198,6 +204,7 @@ class TelevisionUI {
 
     // Debug endpoint to check current playback state
     this.app.get(`/:slug/debug`, function(req, res) {
+        res.set('Cache-Control', 'no-store')
         const slug = req.params.slug
         const channel = ChannelPool().queue.find(c => c.slug === slug)
         if (!channel) {
@@ -299,6 +306,7 @@ class TelevisionUI {
 
     // Single channel schedule
     this.app.get(`/:slug/schedule`, function(req, res) {
+        res.set('Cache-Control', 'no-store')
         const slug = req.params.slug
         const channel = ChannelPool().queue.find(c => c.slug === slug)
 
@@ -324,6 +332,7 @@ class TelevisionUI {
 
     // Manifest endpoint - shows hash to filename mapping for debugging
     this.app.get(`/:slug/manifest`, function(req, res) {
+        res.set('Cache-Control', 'no-store')
         const slug = req.params.slug
         if (!channelPool.getChannelBySlug(slug)) return res.status(404).json({ error: 'Channel not found' })
         const manifestPath = path.join(CACHE_DIR, 'channels', slug, 'manifest.json')
@@ -389,7 +398,7 @@ class TelevisionUI {
     })
 
     this.server = this.app.listen(this.port, async () => {
-        Log(tag, `Webapp is live at http://localhost:${WEB_UI_PORT}`)
+        Log(tag, `Webapp is live at http://localhost:${this.port}`)
     })
 
   }

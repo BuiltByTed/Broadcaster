@@ -25,6 +25,7 @@ export function watchPicture(video, onPicture) {
     const load = async () => {
       try {
         const response = await fetch(`/api/picture/${encodeURIComponent(next.slug)}/${next.hash}`, { signal })
+        if (response.status === 404) return
         if (!response.ok) throw new Error('Picture profile not ready')
         const value = await response.json()
         if (signal.aborted) return
