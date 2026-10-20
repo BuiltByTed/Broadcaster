@@ -26,13 +26,32 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Record previous trust store
+        run: |
+          docker pull tedcharles/broadcaster:dev
+          python3 security/verify-ca.py tedcharles/broadcaster:dev --output ca-old.json
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
+        id: ca_build
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: true
+          push: false
+          load: true
+          pull: true
+          no-cache: true
           tags: ${{ env.DOCKER_IMAGE }}:dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify G3 absent before publishing
+        env:
+          IMAGE_ID: ${{ steps.ca_build.outputs.imageid }}
+        run: python3 security/verify-ca.py "$IMAGE_ID" --baseline ca-old.json --output ca-new.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ca-verification
+          path: ca-*.json
+      - name: Publish verified development image
+        run: docker push tedcharles/broadcaster:dev

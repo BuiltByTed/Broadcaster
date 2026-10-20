@@ -47,8 +47,8 @@ jobs:
 
       - name: Record previous image trust store
         run: |
-          docker pull --platform linux/amd64 tedcharles/broadcaster:dev
-          python3 security/verify-ca.py tedcharles/broadcaster:dev --output "$RUNNER_TEMP/ca-old.json"
+          docker pull --platform linux/amd64 tedcharles/broadcaster:latest
+          python3 security/verify-ca.py tedcharles/broadcaster:latest --output "$RUNNER_TEMP/ca-old.json"
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         id: ca_build
