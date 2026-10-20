@@ -22,9 +22,8 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
 # Mozilla bug 2083449: remove only emSign ECC Root CA - G3.
 COPY security/remove-g3.sh /usr/local/sbin/remove-g3
-COPY security/retained-ca/ /usr/local/share/g3-retained-ca/
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssl && rm -rf /var/lib/apt/lists/* && sh /usr/local/sbin/remove-g3
-ENV NODE_OPTIONS=--use-openssl-ca
+ENV NODE_OPTIONS=--use-openssl-ca SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 
 # Install system dependencies and ffmpeg with NVIDIA support

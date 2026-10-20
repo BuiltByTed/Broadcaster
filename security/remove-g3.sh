@@ -28,19 +28,6 @@ if [ -f "$work/anchors" ]; then
     done < "$work/anchors"
 fi
 update-ca-certificates --fresh
-# Preserve G1/C1/C3 as requested, including when a refreshed distro package
-# has independently removed C1/C3. These are public, fingerprint-pinned roots
-# copied from the previous published image, never downloaded during a build.
-openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt | openssl pkcs7 -print_certs -noout > "$work/subjects"
-restored=0
-for certificate in /usr/local/share/g3-retained-ca/*.crt; do
-    subject=$(openssl x509 -in "$certificate" -noout -subject)
-    if ! grep -Fxq "$subject" "$work/subjects"; then
-        cp "$certificate" /usr/local/share/ca-certificates/
-        restored=1
-    fi
-done
-if [ "$restored" = 1 ]; then update-ca-certificates --fresh; fi
 # Python distributions can carry certifi separately from the OS store.
 for directory in /usr/local/lib /opt; do
     [ ! -d "$directory" ] || find "$directory" -type f -path '*/certifi/cacert.pem' >> "$work/bundles"

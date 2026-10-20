@@ -65,5 +65,3 @@ Webapp/combined_4x3.ts
 # Required by the persistent CA trust-store hardening step.
 !security/
 !security/remove-g3.sh
-!security/retained-ca/
-!security/retained-ca/*.crt

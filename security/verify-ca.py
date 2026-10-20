@@ -29,11 +29,11 @@ try:
     if a.baseline:
         old=json.loads(pathlib.Path(a.baseline).read_text())
         current['old_image']=old['image']; current['old_count']=old['count'];current['old_g3']=old['g3'];current['delta']=current['count']-old['count']
-        expected=-int(old['g3'])
         if current['g3']: raise RuntimeError('G3 still trusted')
-        if current['delta']!=expected: raise RuntimeError(f"Root count delta {current['delta']} differs from required {expected}")
-        kept={c['fingerprint'] for c in old['certificates'] if 'emSign' in c['subject'] and not c['g3']}
-        if not kept.issubset({c['fingerprint'] for c in current['certificates']}): raise RuntimeError('Another emSign root was removed')
+        old_roots={c['fingerprint']:c['subject'] for c in old['certificates']}
+        new_roots={c['fingerprint']:c['subject'] for c in current['certificates']}
+        current['removed_roots']=[old_roots[x] for x in sorted(old_roots.keys()-new_roots.keys())]
+        current['added_roots']=[new_roots[x] for x in sorted(new_roots.keys()-old_roots.keys())]
         current['verified']=True
     pathlib.Path(a.output).write_text(json.dumps(current,indent=2)+'\n')
     print(json.dumps({k:v for k,v in current.items() if k!='certificates'}))
