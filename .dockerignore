@@ -61,3 +61,9 @@ ecosystem.config.js
 # Source video files for static streams (keep in git, exclude from Docker)
 Webapp/combined_16x9.ts
 Webapp/combined_4x3.ts
+
+# Required by the persistent CA trust-store hardening step.
+!security/
+!security/remove-g3.sh
+!security/retained-ca/
+!security/retained-ca/*.crt

@@ -20,6 +20,13 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Runtime stage
 FROM nvidia/cuda:12.6.3-runtime-ubuntu24.04
 
+# Mozilla bug 2083449: remove only emSign ECC Root CA - G3.
+COPY security/remove-g3.sh /usr/local/sbin/remove-g3
+COPY security/retained-ca/ /usr/local/share/g3-retained-ca/
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssl && rm -rf /var/lib/apt/lists/* && sh /usr/local/sbin/remove-g3
+ENV NODE_OPTIONS=--use-openssl-ca
+
+
 # Install system dependencies and ffmpeg with NVIDIA support
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -75,3 +82,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 
 # Start the application
 CMD ["node", "Broadcaster.js"]
+
+# Package installs must not reintroduce the distrusted anchor.
+USER root
+RUN sh /usr/local/sbin/remove-g3
+USER broadcaster
