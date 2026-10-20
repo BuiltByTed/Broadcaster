@@ -45,18 +45,45 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Record previous image trust store
+        run: |
+          docker pull --platform linux/amd64 tedcharles/broadcaster:dev
+          python3 security/verify-ca.py tedcharles/broadcaster:dev --output "$RUNNER_TEMP/ca-old.json"
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
+        id: ca_build
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
-          push: true
+          push: false
+          load: true
+          pull: true
+          no-cache: true
+          build-args: DEPLOY_ID=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Verify CA store before publishing
+        env:
+          IMAGE_ID: ${{ steps.ca_build.outputs.imageid }}
+        run: python3 security/verify-ca.py "$IMAGE_ID" --baseline "$RUNNER_TEMP/ca-old.json" --output "$RUNNER_TEMP/ca-new.json"
+      - name: Save CA verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ca-verification
+          path: ${{ runner.temp }}/ca-*.json
+      - name: Publish verified image
+        env:
+          IMAGE_TAGS: |
+            ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -z "$tag" ] || docker push "$tag"
+          done <<< "$IMAGE_TAGS"
       - name: Update Docker Hub description
         uses: peter-evans/dockerhub-description@v4
         with:
