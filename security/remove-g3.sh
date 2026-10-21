@@ -29,7 +29,7 @@ if [ -f "$work/anchors" ]; then
 fi
 update-ca-certificates --fresh
 # Python distributions can carry certifi separately from the OS store.
-for directory in /usr/local/lib /opt; do
+for directory in /usr/lib /usr/local/lib /opt; do
     [ ! -d "$directory" ] || find "$directory" -type f -path '*/certifi/cacert.pem' >> "$work/bundles"
 done
 printf '%s\n' /etc/ssl/certs/ca-certificates.crt >> "$work/bundles"
@@ -50,3 +50,9 @@ while IFS= read -r bundle; do
 done < "$work/bundles"
 # Rehash symlinks without enabling disabled anchors again.
 openssl rehash /etc/ssl/certs
+
+# Remove G3 from Node's embedded public CA data as well as the OS bundle.
+if command -v node >/dev/null 2>&1; then
+    node /usr/local/sbin/strip-node-g3.cjs
+    node -e 'const c=require("crypto");if(require("tls").rootCertificates.some(p=>new c.X509Certificate(p).subject.includes("emSign ECC Root CA - G3")))process.exit(1)'
+fi
